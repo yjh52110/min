@@ -36,6 +36,19 @@
   .err{background:#2d1418;border:1px solid var(--red);color:#ffb3ae;
     padding:10px 16px;margin:10px 24px;border-radius:8px;font-size:13px;display:none}
   footer{color:var(--muted);font-size:12px;padding:16px 24px;border-top:1px solid var(--border)}
+  .install{margin:18px 24px 0;background:var(--panel);border:1px solid var(--border);
+    border-radius:10px;padding:14px 18px}
+  .install-label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
+  .install-row{display:flex;gap:10px;align-items:stretch}
+  .install-row code{flex:1;background:#0b0f14;border:1px solid var(--border);border-radius:8px;
+    padding:10px 12px;font-size:13px;color:var(--txt);overflow-x:auto;white-space:nowrap;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  #copyBtn{background:var(--accent);color:#1a1205;border:none;border-radius:8px;
+    padding:0 18px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
+  #copyBtn:hover{filter:brightness(1.1)}
+  #copyBtn.done{background:var(--green);color:#04210d}
+  .install-hint{color:var(--muted);font-size:12px;margin-top:8px}
+  .install-hint code{background:#0b0f14;padding:1px 5px;border-radius:4px}
 </style>
 </head>
 <body>
@@ -45,6 +58,15 @@
   </header>
 
   <div class="err" id="err"></div>
+
+  <div class="install">
+    <div class="install-label">子节点一键安装命令（在子节点上以 root 运行）</div>
+    <div class="install-row">
+      <code id="installCmd">加载中…</code>
+      <button id="copyBtn" type="button">复制</button>
+    </div>
+    <div class="install-hint">把 <code>--worker</code> 后面的名字改成你想要的节点名（每台用不同名字便于区分）。</div>
+  </div>
 
   <div class="cards">
     <div class="card"><div class="label">总算力</div><div class="value" id="hrTotal">—</div></div>
@@ -151,6 +173,33 @@ async function tick(){
     document.getElementById('refreshMeta').textContent = '错误';
   }
 }
+
+// Build the one-line installer using the host serving this page, so the IP is
+// always correct. Workers connect to the proxy on port 3333.
+const PROXY_HOST = location.hostname;
+const INSTALL_CMD =
+  'curl -fsSL https://raw.githubusercontent.com/yjh52110/min/main/xmr-mining/scripts/install-worker.sh'
+  + ' | sudo bash -s -- --proxy ' + PROXY_HOST + ':3333 --worker vps-1';
+document.getElementById('installCmd').textContent = INSTALL_CMD;
+
+document.getElementById('copyBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('copyBtn');
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(INSTALL_CMD);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = INSTALL_CMD; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+    }
+    btn.textContent = '已复制'; btn.classList.add('done');
+    setTimeout(()=>{ btn.textContent='复制'; btn.classList.remove('done'); }, 1800);
+  }catch(e){
+    btn.textContent = '复制失败';
+    setTimeout(()=>{ btn.textContent='复制'; }, 1800);
+  }
+});
 
 tick();
 setInterval(tick, REFRESH);
