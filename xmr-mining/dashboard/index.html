@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XMR 矿工仪表盘</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --txt:#e6edf3;
+    --muted:#8b949e; --green:#3fb950; --red:#f85149; --accent:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{padding:18px 24px;border-bottom:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  h1{font-size:18px;margin:0;font-weight:600}
+  h1 span{color:var(--accent)}
+  .meta{color:var(--muted);font-size:13px}
+  .cards{display:flex;gap:14px;flex-wrap:wrap;padding:20px 24px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:14px 18px;min-width:150px;flex:1}
+  .card .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .card .value{font-size:24px;font-weight:700;margin-top:6px}
+  .wrap{padding:0 24px 40px}
+  table{width:100%;border-collapse:collapse;background:var(--panel);
+    border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  th,td{padding:11px 14px;text-align:left;font-size:14px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  tr:last-child td{border-bottom:none}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px}
+  .on{background:var(--green)} .off{background:var(--red)}
+  .status-on{color:var(--green)} .status-off{color:var(--red)}
+  .empty{padding:30px;text-align:center;color:var(--muted)}
+  .err{background:#2d1418;border:1px solid var(--red);color:#ffb3ae;
+    padding:10px 16px;margin:10px 24px;border-radius:8px;font-size:13px;display:none}
+  footer{color:var(--muted);font-size:12px;padding:16px 24px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+  <header>
+    <h1>XMR 挖矿 <span>矿工仪表盘</span></h1>
+    <div class="meta" id="refreshMeta">连接中…</div>
+  </header>
+
+  <div class="err" id="err"></div>
+
+  <div class="cards">
+    <div class="card"><div class="label">总算力</div><div class="value" id="hrTotal">—</div></div>
+    <div class="card"><div class="label">在线节点</div><div class="value" id="online">—</div></div>
+    <div class="card"><div class="label">有效份额</div><div class="value" id="accepted">—</div></div>
+    <div class="card"><div class="label">拒绝份额</div><div class="value" id="rejected">—</div></div>
+    <div class="card"><div class="label">连接矿机数</div><div class="value" id="miners">—</div></div>
+  </div>
+
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>状态</th><th>节点名称</th><th>IP 地址</th>
+          <th class="num">算力</th><th class="num">有效份额</th>
+          <th class="num">拒绝份额</th><th class="num">最近提交</th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <footer>每 10 秒自动刷新 · 通过 <code>/api/</code> 读取 XMRig-Proxy 接口</footer>
+
+<script>
+const API = '/api';            // nginx reverse-proxies to the proxy (token added server-side)
+const REFRESH = 10000;
+const ONLINE_WINDOW = 10 * 60 * 1000; // last share within 10 min => online
+
+function fmtHr(h){
+  h = +h || 0;
+  if (h >= 1e6) return (h/1e6).toFixed(2)+' MH/s';
+  if (h >= 1e3) return (h/1e3).toFixed(2)+' kH/s';
+  return h.toFixed(0)+' H/s';
+}
+function fmtAgo(ts){
+  if(!ts) return '—';
+  const s = Math.floor((Date.now()-ts)/1000);
+  if(s<60) return s+' 秒前';
+  if(s<3600) return Math.floor(s/60)+' 分钟前';
+  if(s<86400) return Math.floor(s/3600)+' 小时前';
+  return Math.floor(s/86400)+' 天前';
+}
+function showErr(msg){
+  const e=document.getElementById('err');
+  if(msg){e.textContent=msg;e.style.display='block';}else{e.style.display='none';}
+}
+
+async function getJSON(path){
+  const r = await fetch(API+path, {cache:'no-store'});
+  if(!r.ok) throw new Error(path+' → HTTP '+r.status);
+  return r.json();
+}
+
+async function tick(){
+  // Summary and workers are fetched independently so one failing doesn't blank the other.
+  let ok = true;
+
+  try{
+    const summary = await getJSON('/1/summary');
+    const hr = (summary.hashrate && summary.hashrate.total) ? summary.hashrate.total[0] : 0;
+    document.getElementById('hrTotal').textContent = fmtHr(hr);
+    const res = summary.results || {};
+    document.getElementById('accepted').textContent = res.accepted ?? '—';
+    document.getElementById('rejected').textContent = res.rejected ?? '—';
+    const miners = summary.miners || {};
+    document.getElementById('miners').textContent =
+      (miners.now ?? 0) + (miners.max != null ? ' / ' + miners.max : '');
+  }catch(e){ ok = false; }
+
+  try{
+    const workers = await getJSON('/1/workers');
+    // Each row: [name, ip, conns, accepted, rejected, invalid, hashes, lastHash, hr1, hr2, ...]
+    const list = (workers.workers || []);
+    const tbody = document.getElementById('rows');
+    let onlineCount = 0;
+    if(list.length === 0){
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无子节点连接。用 install-worker.sh 在子节点上一键安装即可。</td></tr>';
+    } else {
+      tbody.innerHTML = list.map(w => {
+        const name=w[0], ip=w[1], acc=w[3], rej=w[4], lastHash=w[7];
+        const whr = w.length>8 ? w[8] : 0;
+        const online = lastHash && (Date.now()-lastHash) < ONLINE_WINDOW;
+        if(online) onlineCount++;
+        return `<tr>
+          <td><span class="dot ${online?'on':'off'}"></span><span class="${online?'status-on':'status-off'}">${online?'在线':'离线'}</span></td>
+          <td>${name||'(未命名)'}</td>
+          <td>${ip||'—'}</td>
+          <td class="num">${fmtHr(whr)}</td>
+          <td class="num">${acc}</td>
+          <td class="num">${rej}</td>
+          <td class="num">${fmtAgo(lastHash)}</td>
+        </tr>`;
+      }).join('');
+    }
+    document.getElementById('online').textContent = onlineCount + ' / ' + list.length;
+  }catch(e){ ok = false; }
+
+  if(ok){
+    showErr('');
+    document.getElementById('refreshMeta').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+  } else {
+    showErr('无法连接代理 API（xmrig-proxy 是否正在运行？）');
+    document.getElementById('refreshMeta').textContent = '错误';
+  }
+}
+
+tick();
+setInterval(tick, REFRESH);
+</script>
+</body>
+</html>

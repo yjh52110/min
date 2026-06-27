@@ -9,11 +9,13 @@ set -e
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
 log_info()  { echo -e "${GREEN}[INFO]${NC}  $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $1"; }
+log_err()   { echo -e "${RED}[ERROR]${NC} $1"; }
 log_title() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 
 PROXY_DIR="$(cd "$(dirname "$0")/../xmrig-proxy" && pwd)"
@@ -54,25 +56,30 @@ while [ $# -gt 0 ]; do
         --api-token)   API_TOKEN="$2"; shift 2;;
         --api-writable) API_RESTRICTED="false"; shift;;
         -h|--help)     usage; exit 0;;
-        *) echo "Unknown option: $1"; usage; exit 1;;
+        *) log_err "Unknown option: $1"; usage; exit 1;;
     esac
 done
 
+# Monero base58 alphabet excludes 0, O, I, l.
 validate_wallet() {
     local addr="${1%%[.+]*}"
-    echo "$addr" | grep -Eq '^[48][0-9A-Za-z]{94}$'
+    echo "$addr" | grep -Eq '^[48][1-9A-HJ-NP-Za-km-z]{94}$'
 }
 
 log_title "XMRig Proxy Setup"
 
 if [ -z "$WALLET" ]; then
-    log_warn "No wallet address provided — pass --wallet ADDR or set WALLET env var."
-    log_warn "All worker hashrate is credited to the proxy's wallet."
+    log_err "No wallet address provided — pass --wallet ADDR or set WALLET env var."
+    log_err "All worker hashrate is credited to the proxy's wallet."
     exit 1
 fi
 if ! validate_wallet "$WALLET"; then
-    log_warn "Invalid Monero wallet address: ${WALLET}"
-    log_warn "Expected 95 base58 chars starting with 4 (standard) or 8 (subaddress)."
+    log_err "Invalid Monero wallet address: ${WALLET}"
+    log_err "Expected 95 base58 chars starting with 4 (standard) or 8 (subaddress)."
+    exit 1
+fi
+if [ -n "$API_TOKEN" ] && ! echo "$API_TOKEN" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+    log_err "Invalid --api-token (use letters, digits, . _ - only)."
     exit 1
 fi
 log_info "Wallet address validated"
@@ -94,6 +101,12 @@ if [ -z "$API_TOKEN" ]; then
 else
     ACCESS_TOKEN="$API_TOKEN"
 fi
+
+# Persist the token to a root-readable file rather than echoing it to the
+# terminal, so it is not captured in shell history or CI logs.
+TOKEN_FILE="${PROXY_DIR}/api-token.txt"
+( umask 077; printf '%s\n' "$ACCESS_TOKEN" > "$TOKEN_FILE" )
+chmod 600 "$TOKEN_FILE" 2>/dev/null || true
 
 cat > "${PROXY_CONFIG}" << PROXY_CFG
 {
@@ -150,21 +163,21 @@ log_info ""
 log_info "Configuration:"
 log_info "  Worker port (miners connect here): ${WORKER_PORT}"
 log_info "  API port (monitoring):             ${API_PORT}"
-log_info "  API access token:                  ${ACCESS_TOKEN}"
+log_info "  API access token saved to:         ${TOKEN_FILE} (chmod 600)"
+log_info "  Read it with:                      cat ${TOKEN_FILE}"
 
 # ─── 3. API Usage Guide ──────────────────────────────────────────
 
 log_title "Monitoring API Usage"
 
 echo ""
+echo "  (token: cat ${TOKEN_FILE})"
+echo ""
 echo "  View all workers (hashrate + online status):"
-echo "    curl -H 'Authorization: Bearer ${ACCESS_TOKEN}' http://localhost:${API_PORT}/2/workers"
+echo "    curl -H \"Authorization: Bearer \$(cat ${TOKEN_FILE})\" http://localhost:${API_PORT}/1/workers"
 echo ""
 echo "  View summary:"
-echo "    curl -H 'Authorization: Bearer ${ACCESS_TOKEN}' http://localhost:${API_PORT}/2/summary"
-echo ""
-echo "  View specific worker backends:"
-echo "    curl -H 'Authorization: Bearer ${ACCESS_TOKEN}' http://localhost:${API_PORT}/2/backends"
+echo "    curl -H \"Authorization: Bearer \$(cat ${TOKEN_FILE})\" http://localhost:${API_PORT}/1/summary"
 echo ""
 
 # ─── 4. Worker connection guide ───────────────────────────────────

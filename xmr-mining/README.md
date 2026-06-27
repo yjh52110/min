@@ -82,10 +82,10 @@ On each worker machine:
 **API:**
 ```bash
 # View all workers hashrate & online status
-curl -H 'Authorization: Bearer YOUR_TOKEN' http://PROXY_IP:4048/2/workers
+curl -H 'Authorization: Bearer YOUR_TOKEN' http://PROXY_IP:4048/1/workers
 
 # Summary
-curl -H 'Authorization: Bearer YOUR_TOKEN' http://PROXY_IP:4048/2/summary
+curl -H 'Authorization: Bearer YOUR_TOKEN' http://PROXY_IP:4048/1/summary
 ```
 
 **Web Dashboard:**
