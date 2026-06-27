@@ -229,8 +229,6 @@ else
     XMRIG_CFG="${INSTALL_DIR}/xmrig/config.json"
     nohup "$XMRIG_BIN" --config="$XMRIG_CFG" >"${INSTALL_DIR}/xmrig/xmrig.out" 2>&1 &
     MINER_PID=$!
-    # Shield the miner from the kernel OOM killer (best-effort; needs root).
-    echo -1000 > "/proc/${MINER_PID}/oom_score_adj" 2>/dev/null || true
     log_info "Started in background (PID ${MINER_PID}). Speed log: tail -f ${INSTALL_DIR}/xmrig/xmrig.log"
 
     # Watchdog: relaunch xmrig within ~30s if it ever exits or gets killed, so a
@@ -241,18 +239,33 @@ BIN="${XMRIG_BIN}"; CFG="${XMRIG_CFG}"; OUT="${INSTALL_DIR}/xmrig/xmrig.out"
 while true; do
     if ! pgrep -f "\$BIN" >/dev/null 2>&1; then
         nohup "\$BIN" --config="\$CFG" >"\$OUT" 2>&1 &
-        echo -1000 > "/proc/\$!/oom_score_adj" 2>/dev/null || true
     fi
     sleep 30
 done
 WATCHDOG
     chmod +x "${INSTALL_DIR}/watchdog.sh"
     nohup "${INSTALL_DIR}/watchdog.sh" >/dev/null 2>&1 &
-    echo -1000 > "/proc/$!/oom_score_adj" 2>/dev/null || true
     log_info "Watchdog running — auto-restarts xmrig if it stops."
     log_warn "After a FULL reboot there's no systemd to auto-start; re-run this install command."
     log_info "Stop mining completely: pkill -f ${INSTALL_DIR}/watchdog.sh && pkill -f ${XMRIG_BIN}"
 fi
+
+# Persist the stop instructions so an operator can always find how to disable it,
+# even long after the install output has scrolled away.
+cat > "${INSTALL_DIR}/STOP.txt" <<STOPDOC
+How to stop this miner
+======================
+
+A watchdog auto-restarts the miner within ~30s if it stops, so you must stop the
+watchdog FIRST, then the miner:
+
+    sudo pkill -f ${INSTALL_DIR}/watchdog.sh
+    sudo pkill -f ${INSTALL_DIR}/xmrig/xmrig
+
+If installed as a systemd service instead:
+
+    sudo systemctl disable --now xmrig
+STOPDOC
 
 log_title "Done"
 log_info "Worker installed at ${INSTALL_DIR}"
