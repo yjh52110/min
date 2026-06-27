@@ -29,6 +29,7 @@ PROXY="${PROXY:-}"
 WORKER_NAME="${WORKER_NAME:-}"
 API_BIND="${API_BIND:-127.0.0.1}"
 API_TOKEN="${API_TOKEN:-}"
+THREADS="${THREADS:-}"   # empty = auto-detect; a number or 'max' overrides
 
 usage() {
     cat <<USAGE
@@ -41,6 +42,10 @@ Options:
                         public pools. The wallet lives on the proxy, so no
                         wallet is needed in this mode.
   -n, --worker NAME     Worker / rig name (default: vps-<hostname>).
+  -t, --threads N|max   Force the mining thread count instead of auto-detecting.
+                        'max' uses every logical CPU. RandomX is cache-bound, so
+                        more threads is not always faster — benchmark with
+                        'curl -s http://127.0.0.1:4040/2/summary'.
       --api-bind ADDR   Address the local HTTP API binds to
                         (default: 127.0.0.1; use 0.0.0.0 to expose it).
       --api-token TOK   Bearer token protecting the HTTP API
@@ -59,6 +64,7 @@ while [ $# -gt 0 ]; do
         -w|--wallet)  WALLET="$2"; shift 2;;
         -p|--proxy)   PROXY="$2"; shift 2;;
         -n|--worker)  WORKER_NAME="$2"; shift 2;;
+        -t|--threads) THREADS="$2"; shift 2;;
         --api-bind)   API_BIND="$2"; shift 2;;
         --api-token)  API_TOKEN="$2"; shift 2;;
         -h|--help)    usage; exit 0;;
@@ -86,6 +92,10 @@ if [ -n "$API_TOKEN" ] && ! echo "$API_TOKEN" | grep -Eq '^[A-Za-z0-9._-]+$'; th
 fi
 if [ -n "$API_BIND" ] && ! echo "$API_BIND" | grep -Eq '^[A-Za-z0-9.:_-]+$'; then
     log_err "Invalid --api-bind: ${API_BIND} (expected an IP or hostname)."
+    exit 1
+fi
+if [ -n "$THREADS" ] && [ "$THREADS" != "max" ] && ! echo "$THREADS" | grep -Eq '^[0-9]{1,3}$'; then
+    log_err "Invalid --threads: ${THREADS} (expected a number or 'max')."
     exit 1
 fi
 
@@ -334,6 +344,20 @@ else
     log_info "Unknown CPU vendor: ${CPU_VENDOR}"
 fi
 
+# A user-supplied --threads value overrides the auto-detected count (and the
+# RandomX cache/HT heuristics). 'max' means every logical CPU. Clamp to 1..CPU.
+if [ -n "$THREADS" ]; then
+    if [ "$THREADS" = "max" ]; then
+        OPTIMAL_THREADS=$CPU_THREADS
+    else
+        OPTIMAL_THREADS=$THREADS
+        [ "$OPTIMAL_THREADS" -gt "$CPU_THREADS" ] && OPTIMAL_THREADS=$CPU_THREADS
+        [ "$OPTIMAL_THREADS" -lt 1 ] && OPTIMAL_THREADS=1
+    fi
+    HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))
+    log_warn "Thread override: using ${OPTIMAL_THREADS} thread(s) (--threads ${THREADS}); RandomX may not scale past physical cores."
+fi
+
 # ─── 7. Generate Optimized config.json ────────────────────────────
 
 log_title "Generating Optimized Config"
@@ -446,7 +470,7 @@ ${POOLS_JSON}
     ],
     "donate-level": 1,
     "donate-over-proxy": 1,
-    "log-file": "xmrig.log",
+    "log-file": "${XMRIG_DIR}/xmrig.log",
     "print-time": 60,
     "retries": 5,
     "retry-pause": 5,
@@ -521,6 +545,7 @@ echo "  Mining target:    public pools (wallet: ${WALLET})"
 fi
 echo "  HTTP API bind:    ${API_BIND}:4040"
 echo "  Config:           ${CONFIG_FILE}"
+echo "  Log file:         ${XMRIG_DIR}/xmrig.log"
 echo ""
 
 # Estimated hashrate ranges
