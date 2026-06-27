@@ -102,6 +102,19 @@ function fmtHr(h){
   if (h >= 1e3) return (h/1e3).toFixed(2)+' kH/s';
   return h.toFixed(0)+' H/s';
 }
+// Worker name/IP come from miners that connect to the public proxy, so they are
+// untrusted; escape before inserting into HTML to prevent stored XSS.
+function esc(v){
+  return String(v).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+}
+// xmrig-proxy reports the last-share time as a Unix timestamp; normalize
+// seconds-vs-milliseconds so the online check works across versions.
+function toMs(ts){
+  ts = +ts || 0;
+  return ts > 0 && ts < 1e12 ? ts * 1000 : ts;
+}
 function fmtAgo(ts){
   if(!ts) return '—';
   const s = Math.floor((Date.now()-ts)/1000);
@@ -147,17 +160,17 @@ async function tick(){
       tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无子节点连接。用 install-worker.sh 在子节点上一键安装即可。</td></tr>';
     } else {
       tbody.innerHTML = list.map(w => {
-        const name=w[0], ip=w[1], acc=w[3], rej=w[4], lastHash=w[7];
+        const name=w[0], ip=w[1], acc=w[3], rej=w[4], lastHash=toMs(w[7]);
         const whr = w.length>8 ? w[8] : 0;
         const online = lastHash && (Date.now()-lastHash) < ONLINE_WINDOW;
         if(online) onlineCount++;
         return `<tr>
           <td><span class="dot ${online?'on':'off'}"></span><span class="${online?'status-on':'status-off'}">${online?'在线':'离线'}</span></td>
-          <td>${name||'(未命名)'}</td>
-          <td>${ip||'—'}</td>
+          <td>${name?esc(name):'(未命名)'}</td>
+          <td>${ip?esc(ip):'—'}</td>
           <td class="num">${fmtHr(whr)}</td>
-          <td class="num">${acc}</td>
-          <td class="num">${rej}</td>
+          <td class="num">${esc(acc)}</td>
+          <td class="num">${esc(rej)}</td>
           <td class="num">${fmtAgo(lastHash)}</td>
         </tr>`;
       }).join('');
