@@ -68,12 +68,31 @@ done
 
 # Validate a Monero address: standard ('4') or subaddress ('8'), 95 base58
 # chars. Strips any pool worker suffix (".name" or "+diff") before checking.
+# Uses the Monero base58 alphabet (excludes 0, O, I, l).
 validate_wallet() {
     local addr="${1%%[.+]*}"
-    echo "$addr" | grep -Eq '^[48][0-9A-Za-z]{94}$'
+    echo "$addr" | grep -Eq '^[48][1-9A-HJ-NP-Za-km-z]{94}$'
 }
 
+# Reject values that could break out of the generated JSON string. Names and
+# tokens are restricted to a safe charset; the proxy must look like host:port.
+if [ -n "$WORKER_NAME" ] && ! echo "$WORKER_NAME" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+    log_err "Invalid --worker name: ${WORKER_NAME} (use letters, digits, . _ - only)."
+    exit 1
+fi
+if [ -n "$API_TOKEN" ] && ! echo "$API_TOKEN" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+    log_err "Invalid --api-token (use letters, digits, . _ - only)."
+    exit 1
+fi
+
 if [ -n "$PROXY" ]; then
+    if ! echo "$PROXY" | grep -Eq '^[A-Za-z0-9.:_-]+:[0-9]{1,5}$'; then
+        log_err "Invalid --proxy: ${PROXY} (expected host:port, e.g. 10.0.0.5:3333)."
+        exit 1
+    fi
+    if [ -n "$WALLET" ]; then
+        log_warn "Both proxy and wallet are set; using proxy mode and ignoring the wallet."
+    fi
     log_info "Proxy mode: worker will connect to ${PROXY} (wallet held by proxy)"
 else
     if [ -z "$WALLET" ]; then
@@ -288,6 +307,16 @@ if echo "$CPU_VENDOR" | grep -qi "Intel"; then
         OPTIMAL_THREADS=$CPU_CORES
         if [ "$OPTIMAL_THREADS" -gt 3 ]; then
             OPTIMAL_THREADS=$((OPTIMAL_THREADS - 1))
+        fi
+        # Never exceed the cache/memory budget computed earlier (2MB L3 per thread)
+        if [ "$MAX_THREADS_BY_CACHE" -lt "$OPTIMAL_THREADS" ]; then
+            OPTIMAL_THREADS=$MAX_THREADS_BY_CACHE
+        fi
+        if [ "$MAX_THREADS_BY_MEM" -lt "$OPTIMAL_THREADS" ]; then
+            OPTIMAL_THREADS=$MAX_THREADS_BY_MEM
+        fi
+        if [ "$OPTIMAL_THREADS" -lt 1 ]; then
+            OPTIMAL_THREADS=1
         fi
     fi
 elif echo "$CPU_VENDOR" | grep -qi "AMD"; then

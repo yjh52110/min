@@ -60,6 +60,7 @@ while [ $# -gt 0 ]; do
         --dir)        INSTALL_DIR="$2"; shift 2;;
         --repo)       REPO="$2"; shift 2;;
         --branch)     BRANCH="$2"; shift 2;;
+        --optimize-sha256) OPTIMIZE_SHA256="$2"; shift 2;;
         -h|--help)    usage; exit 0;;
         *) log_err "Unknown option: $1"; usage; exit 1;;
     esac
@@ -133,6 +134,23 @@ log_info "XMRig ready: $(${INSTALL_DIR}/xmrig/xmrig --version 2>/dev/null | head
 # ─── 2. Download tuning script ────────────────────────────────────
 log_title "Downloading Auto-Optimize Script"
 fetch "${RAW_BASE}/scripts/auto-optimize.sh" "${INSTALL_DIR}/scripts/auto-optimize.sh"
+
+# Optional integrity check of the remotely fetched script. Pass
+# --optimize-sha256 <hash> (or set OPTIMIZE_SHA256) to enforce it.
+if [ -n "${OPTIMIZE_SHA256:-}" ]; then
+    ACTUAL_SHA=$(sha256sum "${INSTALL_DIR}/scripts/auto-optimize.sh" | awk '{print $1}')
+    if [ "$ACTUAL_SHA" != "$OPTIMIZE_SHA256" ]; then
+        log_err "Checksum mismatch for auto-optimize.sh!"
+        log_err "  expected: ${OPTIMIZE_SHA256}"
+        log_err "  actual:   ${ACTUAL_SHA}"
+        log_err "Aborting to avoid running an unexpected script."
+        exit 1
+    fi
+    log_info "auto-optimize.sh checksum verified"
+else
+    log_warn "No --optimize-sha256 given; skipping integrity check of the fetched script."
+    log_warn "Pin a checksum with --optimize-sha256 <hash> for a trusted install."
+fi
 chmod +x "${INSTALL_DIR}/scripts/auto-optimize.sh"
 
 # ─── 3. Tune + generate config + install service ──────────────────
