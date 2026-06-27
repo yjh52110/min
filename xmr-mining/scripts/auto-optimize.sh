@@ -514,6 +514,8 @@ RestartSec=15
 Nice=-10
 CPUWeight=90
 LimitMEMLOCK=infinity
+# Tell the kernel OOM killer to avoid this service when memory runs low.
+OOMScoreAdjust=-1000
 
 [Install]
 WantedBy=multi-user.target
