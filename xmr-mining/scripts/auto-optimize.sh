@@ -200,7 +200,7 @@ parse_cache_mb() {
 
 # Prefer getconf (portable, returns bytes; 0/empty when unknown), then the
 # size string parsed from sysfs/lscpu above, then a conservative default.
-L3_BYTES=$(getconf LEVEL3_CACHE_SIZE 2>/dev/null)
+L3_BYTES=$(getconf LEVEL3_CACHE_SIZE 2>/dev/null || true)
 if [ -n "$L3_BYTES" ] && [ "$L3_BYTES" -gt 0 ] 2>/dev/null; then
     L3_MB=$((L3_BYTES / 1048576))
 else
