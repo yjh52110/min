@@ -133,10 +133,26 @@ CPU_CORES=$(nproc)
 CPU_THREADS=$(grep -c ^processor /proc/cpuinfo)
 CPU_VENDOR=$(grep -m1 'vendor_id' /proc/cpuinfo | cut -d: -f2 | xargs)
 
-# Cache detection
-L1_CACHE=$(lscpu | grep 'L1d' | head -1 | awk '{print $NF}')
-L2_CACHE=$(lscpu | grep 'L2' | head -1 | awk '{print $NF}')
-L3_CACHE=$(lscpu | grep 'L3' | head -1 | awk '{print $NF}')
+# Cache detection. The old `lscpu | grep L3 | awk '{print $NF}'` breaks on the
+# summary format ("L3 cache: 320 MiB (1 instance)" => grabs "instance)"), so read
+# sysfs first and fall back to lscpu's caches table.
+sysfs_cache() {  # level [type]
+    local lvl="$1" typ="$2" d
+    for d in /sys/devices/system/cpu/cpu0/cache/index*; do
+        [ -r "$d/level" ] || continue
+        [ "$(cat "$d/level" 2>/dev/null)" = "$lvl" ] || continue
+        if [ -z "$typ" ] || [ "$(cat "$d/type" 2>/dev/null)" = "$typ" ]; then
+            cat "$d/size" 2>/dev/null && return 0
+        fi
+    done
+    return 1
+}
+lscpu_cache() {  # level (e.g. L3)
+    lscpu -C=NAME,ALL-SIZE 2>/dev/null | awk -v n="$1" '$1==n {print $2; exit}'
+}
+L1_CACHE=$(sysfs_cache 1 Data || lscpu_cache L1d)
+L2_CACHE=$(sysfs_cache 2 || lscpu_cache L2)
+L3_CACHE=$(sysfs_cache 3 || lscpu_cache L3)
 
 # CPU flags
 CPU_FLAGS=$(grep -m1 'flags' /proc/cpuinfo | cut -d: -f2)
@@ -172,21 +188,24 @@ log_title "Thread Optimization"
 # RandomX requires 2MB L3 cache per thread
 # Parse L3 cache size to MB
 parse_cache_mb() {
-    local val="$1"
-    if echo "$val" | grep -qi 'MiB\|MB'; then
-        echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1
-    elif echo "$val" | grep -qi 'KiB\|KB'; then
-        local kb=$(echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1)
-        echo $((kb / 1024))
-    elif echo "$val" | grep -qi 'GiB\|GB'; then
-        local gb=$(echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1)
-        echo $((gb * 1024))
-    else
-        echo "$val" | grep -oP '[0-9]+' | head -1
-    fi
+    local val="$1" num
+    num=$(echo "$val" | grep -oE '[0-9.]+' | head -1 | cut -d. -f1)
+    [ -z "$num" ] && return
+    case "$val" in
+        *G*|*g*) echo $((num * 1024));;   # GiB / GB / G
+        *K*|*k*) echo $((num / 1024));;   # KiB / KB / K
+        *)       echo "$num";;            # MiB / MB / M / bare number => MB
+    esac
 }
 
-L3_MB=$(parse_cache_mb "${L3_CACHE}")
+# Prefer getconf (portable, returns bytes; 0/empty when unknown), then the
+# size string parsed from sysfs/lscpu above, then a conservative default.
+L3_BYTES=$(getconf LEVEL3_CACHE_SIZE 2>/dev/null)
+if [ -n "$L3_BYTES" ] && [ "$L3_BYTES" -gt 0 ] 2>/dev/null; then
+    L3_MB=$((L3_BYTES / 1048576))
+else
+    L3_MB=$(parse_cache_mb "${L3_CACHE}")
+fi
 if [ -z "$L3_MB" ] || [ "$L3_MB" -eq 0 ] 2>/dev/null; then
     L3_MB=4
     log_warn "Could not detect L3 cache, assuming ${L3_MB} MB"
