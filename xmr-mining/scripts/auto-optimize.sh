@@ -133,10 +133,26 @@ CPU_CORES=$(nproc)
 CPU_THREADS=$(grep -c ^processor /proc/cpuinfo)
 CPU_VENDOR=$(grep -m1 'vendor_id' /proc/cpuinfo | cut -d: -f2 | xargs)
 
-# Cache detection
-L1_CACHE=$(lscpu | grep 'L1d' | head -1 | awk '{print $NF}')
-L2_CACHE=$(lscpu | grep 'L2' | head -1 | awk '{print $NF}')
-L3_CACHE=$(lscpu | grep 'L3' | head -1 | awk '{print $NF}')
+# Cache detection. The old `lscpu | grep L3 | awk '{print $NF}'` breaks on the
+# summary format ("L3 cache: 320 MiB (1 instance)" => grabs "instance)"), so read
+# sysfs first and fall back to lscpu's caches table.
+sysfs_cache() {  # level [type]
+    local lvl="$1" typ="$2" d
+    for d in /sys/devices/system/cpu/cpu0/cache/index*; do
+        [ -r "$d/level" ] || continue
+        [ "$(cat "$d/level" 2>/dev/null)" = "$lvl" ] || continue
+        if [ -z "$typ" ] || [ "$(cat "$d/type" 2>/dev/null)" = "$typ" ]; then
+            cat "$d/size" 2>/dev/null && return 0
+        fi
+    done
+    return 1
+}
+lscpu_cache() {  # level (e.g. L3)
+    lscpu -C=NAME,ALL-SIZE 2>/dev/null | awk -v n="$1" '$1==n {print $2; exit}'
+}
+L1_CACHE=$(sysfs_cache 1 Data || lscpu_cache L1d)
+L2_CACHE=$(sysfs_cache 2 || lscpu_cache L2)
+L3_CACHE=$(sysfs_cache 3 || lscpu_cache L3)
 
 # CPU flags
 CPU_FLAGS=$(grep -m1 'flags' /proc/cpuinfo | cut -d: -f2)
@@ -172,21 +188,24 @@ log_title "Thread Optimization"
 # RandomX requires 2MB L3 cache per thread
 # Parse L3 cache size to MB
 parse_cache_mb() {
-    local val="$1"
-    if echo "$val" | grep -qi 'MiB\|MB'; then
-        echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1
-    elif echo "$val" | grep -qi 'KiB\|KB'; then
-        local kb=$(echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1)
-        echo $((kb / 1024))
-    elif echo "$val" | grep -qi 'GiB\|GB'; then
-        local gb=$(echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1)
-        echo $((gb * 1024))
-    else
-        echo "$val" | grep -oP '[0-9]+' | head -1
-    fi
+    local val="$1" num
+    num=$(echo "$val" | grep -oE '[0-9.]+' | head -1 | cut -d. -f1)
+    [ -z "$num" ] && return
+    case "$val" in
+        *G*|*g*) echo $((num * 1024));;   # GiB / GB / G
+        *K*|*k*) echo $((num / 1024));;   # KiB / KB / K
+        *)       echo "$num";;            # MiB / MB / M / bare number => MB
+    esac
 }
 
-L3_MB=$(parse_cache_mb "${L3_CACHE}")
+# Prefer getconf (portable, returns bytes; 0/empty when unknown), then the
+# size string parsed from sysfs/lscpu above, then a conservative default.
+L3_BYTES=$(getconf LEVEL3_CACHE_SIZE 2>/dev/null)
+if [ -n "$L3_BYTES" ] && [ "$L3_BYTES" -gt 0 ] 2>/dev/null; then
+    L3_MB=$((L3_BYTES / 1048576))
+else
+    L3_MB=$(parse_cache_mb "${L3_CACHE}")
+fi
 if [ -z "$L3_MB" ] || [ "$L3_MB" -eq 0 ] 2>/dev/null; then
     L3_MB=4
     log_warn "Could not detect L3 cache, assuming ${L3_MB} MB"
@@ -223,39 +242,7 @@ log_info "Max by cache (2MB/thread): ${MAX_THREADS_BY_CACHE}"
 log_info "Max by memory:     ${MAX_THREADS_BY_MEM}"
 log_info "Optimal threads:   ${OPTIMAL_THREADS}"
 
-# ─── 3. Enable Huge Pages ────────────────────────────────────────
-
-log_title "Huge Pages Setup"
-
-# RandomX benefits greatly from 2MB huge pages
-HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))  # threads + dataset pages overhead
-
-if [ "$(id -u)" -eq 0 ]; then
-    # Enable huge pages
-    sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED} >/dev/null 2>&1 || true
-    CURRENT_HP=$(cat /proc/sys/vm/nr_hugepages)
-    log_info "Huge pages set to: ${CURRENT_HP}"
-
-    # Make persistent
-    if ! grep -q 'vm.nr_hugepages' /etc/sysctl.conf 2>/dev/null; then
-        echo "vm.nr_hugepages=${HUGEPAGES_NEEDED}" >> /etc/sysctl.conf
-        log_info "Added vm.nr_hugepages=${HUGEPAGES_NEEDED} to /etc/sysctl.conf"
-    else
-        sed -i "s/vm.nr_hugepages=.*/vm.nr_hugepages=${HUGEPAGES_NEEDED}/" /etc/sysctl.conf
-        log_info "Updated vm.nr_hugepages in /etc/sysctl.conf"
-    fi
-
-    # 1GB huge pages for supported CPUs
-    if [ "$HAS_PDPE1GB" = "true" ] && [ "$TOTAL_MEM_GB" -ge 4 ]; then
-        log_info "CPU supports 1GB huge pages (pdpe1gb flag detected)"
-        log_info "For best performance, add 'hugepagesz=1G hugepages=3' to kernel boot params"
-    fi
-else
-    log_warn "Not running as root. Run with sudo for huge pages setup:"
-    log_warn "  sudo sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED}"
-fi
-
-# ─── 4. CPU Governor & Performance Tuning ─────────────────────────
+# ─── 3. CPU Governor & Performance Tuning ─────────────────────────
 
 log_title "CPU Performance Tuning"
 
@@ -287,7 +274,7 @@ else
     log_warn "Run as root for CPU governor and THP tuning"
 fi
 
-# ─── 5. Determine RandomX Mode ───────────────────────────────────
+# ─── 4. Determine RandomX Mode ───────────────────────────────────
 
 log_title "RandomX Mode Selection"
 
@@ -300,7 +287,7 @@ else
     log_info "Mode: LIGHT (256MB - lower hashrate but fits in low memory)"
 fi
 
-# ─── 6. Intel vs AMD Specific Tuning ──────────────────────────────
+# ─── 5. Intel vs AMD Specific Tuning ──────────────────────────────
 
 log_title "Vendor-Specific Optimization"
 
@@ -354,8 +341,42 @@ if [ -n "$THREADS" ]; then
         [ "$OPTIMAL_THREADS" -gt "$CPU_THREADS" ] && OPTIMAL_THREADS=$CPU_THREADS
         [ "$OPTIMAL_THREADS" -lt 1 ] && OPTIMAL_THREADS=1
     fi
-    HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))
     log_warn "Thread override: using ${OPTIMAL_THREADS} thread(s) (--threads ${THREADS}); RandomX may not scale past physical cores."
+fi
+
+# ─── 6. Enable Huge Pages ────────────────────────────────────────
+# Done after the thread count is final (auto + HT + --threads override) so the
+# persisted vm.nr_hugepages matches the threads we actually run, not a stale
+# pre-override value.
+
+log_title "Huge Pages Setup"
+
+# RandomX benefits greatly from 2MB huge pages
+HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))  # threads + dataset pages overhead
+
+if [ "$(id -u)" -eq 0 ]; then
+    # Enable huge pages
+    sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED} >/dev/null 2>&1 || true
+    CURRENT_HP=$(cat /proc/sys/vm/nr_hugepages)
+    log_info "Huge pages set to: ${CURRENT_HP}"
+
+    # Make persistent
+    if ! grep -q 'vm.nr_hugepages' /etc/sysctl.conf 2>/dev/null; then
+        echo "vm.nr_hugepages=${HUGEPAGES_NEEDED}" >> /etc/sysctl.conf
+        log_info "Added vm.nr_hugepages=${HUGEPAGES_NEEDED} to /etc/sysctl.conf"
+    else
+        sed -i "s/vm.nr_hugepages=.*/vm.nr_hugepages=${HUGEPAGES_NEEDED}/" /etc/sysctl.conf
+        log_info "Updated vm.nr_hugepages in /etc/sysctl.conf"
+    fi
+
+    # 1GB huge pages for supported CPUs
+    if [ "$HAS_PDPE1GB" = "true" ] && [ "$TOTAL_MEM_GB" -ge 4 ]; then
+        log_info "CPU supports 1GB huge pages (pdpe1gb flag detected)"
+        log_info "For best performance, add 'hugepagesz=1G hugepages=3' to kernel boot params"
+    fi
+else
+    log_warn "Not running as root. Run with sudo for huge pages setup:"
+    log_warn "  sudo sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED}"
 fi
 
 # ─── 7. Generate Optimized config.json ────────────────────────────
