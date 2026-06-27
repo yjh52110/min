@@ -231,11 +231,8 @@ if [ "$OPTIMAL_THREADS" -lt 1 ]; then
     OPTIMAL_THREADS=1
 fi
 
-# For very small VPS (2 cores), use all cores
-# For 4+ cores, leave 1 for system
-if [ "$CPU_THREADS" -gt 3 ] && [ "$OPTIMAL_THREADS" -ge "$CPU_THREADS" ]; then
-    OPTIMAL_THREADS=$((CPU_THREADS - 1))
-fi
+# Default to ALL logical CPUs (only the cache/memory budgets above can lower it).
+# Use --threads N to reserve cores for other workloads if you need to.
 
 log_info "L3 Cache:          ${L3_MB} MB"
 log_info "Max by cache (2MB/thread): ${MAX_THREADS_BY_CACHE}"
@@ -302,23 +299,11 @@ if echo "$CPU_VENDOR" | grep -qi "Intel"; then
     if [ "$HAS_AVX512" = "true" ]; then
         log_info "  AVX-512 detected - best RandomX performance tier"
     fi
-    # Intel HT: use physical cores only for best per-thread hashrate
+    # Note: on Hyper-Threading CPUs RandomX may not scale much past the physical
+    # core count, but we still default to all logical threads; use --threads to
+    # tune down if a lower count benchmarks better.
     if [ "$CPU_THREADS" -gt "$CPU_CORES" ]; then
-        log_info "  Hyper-Threading detected: using ${CPU_CORES} physical cores (skip HT siblings)"
-        OPTIMAL_THREADS=$CPU_CORES
-        if [ "$OPTIMAL_THREADS" -gt 3 ]; then
-            OPTIMAL_THREADS=$((OPTIMAL_THREADS - 1))
-        fi
-        # Never exceed the cache/memory budget computed earlier (2MB L3 per thread)
-        if [ "$MAX_THREADS_BY_CACHE" -lt "$OPTIMAL_THREADS" ]; then
-            OPTIMAL_THREADS=$MAX_THREADS_BY_CACHE
-        fi
-        if [ "$MAX_THREADS_BY_MEM" -lt "$OPTIMAL_THREADS" ]; then
-            OPTIMAL_THREADS=$MAX_THREADS_BY_MEM
-        fi
-        if [ "$OPTIMAL_THREADS" -lt 1 ]; then
-            OPTIMAL_THREADS=1
-        fi
+        log_info "  Hyper-Threading detected: using all ${CPU_THREADS} logical threads (use --threads to tune)"
     fi
 elif echo "$CPU_VENDOR" | grep -qi "AMD"; then
     log_info "AMD CPU detected - applying AMD optimizations"
