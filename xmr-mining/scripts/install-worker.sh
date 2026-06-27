@@ -26,7 +26,10 @@ log_title() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 REPO="${REPO:-yjh52110/min}"
 BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/xmr-worker}"
-XMRIG_TARBALL="${XMRIG_TARBALL:-xmrig-6.26.0-linux-static-x64.tar.gz}"
+XMRIG_VERSION="${XMRIG_VERSION:-6.26.0}"
+XMRIG_TARBALL="${XMRIG_TARBALL:-xmrig-${XMRIG_VERSION}-linux-static-x64.tar.gz}"
+# Expected sha256 of the official static x64 tarball (matches the repo's LFS object).
+XMRIG_SHA256="${XMRIG_SHA256:-fc6f8ae5f64e4f17481f7e3be29a1c56949f216a998414188003eae1db20c9e5}"
 
 PROXY="${PROXY:-}"
 WALLET="${WALLET:-}"
@@ -118,8 +121,29 @@ mkdir -p "${INSTALL_DIR}/xmrig" "${INSTALL_DIR}/scripts"
 
 if [ ! -x "${INSTALL_DIR}/xmrig/xmrig" ]; then
     TMP_TARBALL="${INSTALL_DIR}/xmrig/${XMRIG_TARBALL}"
-    log_info "Fetching ${XMRIG_TARBALL}..."
-    fetch "${RAW_BASE}/xmrig/${XMRIG_TARBALL}" "${TMP_TARBALL}"
+    # The repo stores the tarball via Git LFS, so raw.githubusercontent.com only
+    # serves a pointer file. Pull the binary from the official xmrig release
+    # (primary), then fall back to GitHub's LFS media endpoint for the repo.
+    OFFICIAL_URL="https://github.com/xmrig/xmrig/releases/download/v${XMRIG_VERSION}/${XMRIG_TARBALL}"
+    LFS_MEDIA_URL="https://media.githubusercontent.com/media/${REPO}/${BRANCH}/xmr-mining/xmrig/${XMRIG_TARBALL}"
+    log_info "Fetching ${XMRIG_TARBALL} from official release..."
+    if ! fetch "$OFFICIAL_URL" "${TMP_TARBALL}"; then
+        log_warn "Official release download failed; trying repo LFS media URL..."
+        fetch "$LFS_MEDIA_URL" "${TMP_TARBALL}"
+    fi
+    # Reject an LFS pointer or any non-gzip payload before extracting.
+    if ! tar tzf "${TMP_TARBALL}" >/dev/null 2>&1; then
+        log_warn "Downloaded file is not a valid gzip archive; retrying via repo LFS media URL..."
+        fetch "$LFS_MEDIA_URL" "${TMP_TARBALL}"
+    fi
+    if [ -n "$XMRIG_SHA256" ] && command -v sha256sum >/dev/null 2>&1; then
+        DL_SHA=$(sha256sum "${TMP_TARBALL}" | awk '{print $1}')
+        if [ "$DL_SHA" != "$XMRIG_SHA256" ]; then
+            log_err "xmrig checksum mismatch (expected ${XMRIG_SHA256}, got ${DL_SHA}). Aborting."
+            exit 1
+        fi
+        log_info "xmrig checksum verified"
+    fi
     log_info "Extracting..."
     tar xzf "${TMP_TARBALL}" -C "${INSTALL_DIR}/xmrig" --strip-components=1
     rm -f "${TMP_TARBALL}"

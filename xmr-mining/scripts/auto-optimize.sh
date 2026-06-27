@@ -463,7 +463,9 @@ log_info "Config written to: ${CONFIG_FILE}"
 
 log_title "Systemd Service"
 
-SERVICE_FILE="/tmp/xmrig.service"
+# Write to a private temp file (avoids a predictable /tmp path that another
+# user could pre-create or symlink).
+SERVICE_FILE="$(mktemp "${TMPDIR:-/tmp}/xmrig.service.XXXXXX")"
 cat > "${SERVICE_FILE}" << SYSTEMD_SERVICE
 [Unit]
 Description=XMRig Monero Miner
@@ -485,6 +487,7 @@ SYSTEMD_SERVICE
 
 if [ "$(id -u)" -eq 0 ]; then
     cp "${SERVICE_FILE}" /etc/systemd/system/xmrig.service
+    rm -f "${SERVICE_FILE}"
     log_info "Systemd service installed: /etc/systemd/system/xmrig.service"
     log_info "Enable with: systemctl enable --now xmrig"
 else
