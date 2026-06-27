@@ -82,6 +82,17 @@ if [ -n "$API_TOKEN" ] && ! echo "$API_TOKEN" | grep -Eq '^[A-Za-z0-9._-]+$'; th
     log_err "Invalid --api-token (use letters, digits, . _ - only)."
     exit 1
 fi
+if ! echo "$API_BIND" | grep -Eq '^[A-Za-z0-9.:_-]+$'; then
+    log_err "Invalid --api-bind: ${API_BIND} (expected an IP or hostname)."
+    exit 1
+fi
+# Ports are interpolated unquoted into JSON number fields, so they must be numeric.
+for _p in "$WORKER_PORT" "$API_PORT"; do
+    if ! echo "$_p" | grep -Eq '^[0-9]{1,5}$' || [ "$_p" -lt 1 ] || [ "$_p" -gt 65535 ]; then
+        log_err "Invalid port: ${_p} (expected 1-65535)."
+        exit 1
+    fi
+done
 log_info "Wallet address validated"
 
 # ─── 1. Extract binary ───────────────────────────────────────────

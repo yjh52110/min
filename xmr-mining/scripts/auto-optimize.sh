@@ -84,6 +84,10 @@ if [ -n "$API_TOKEN" ] && ! echo "$API_TOKEN" | grep -Eq '^[A-Za-z0-9._-]+$'; th
     log_err "Invalid --api-token (use letters, digits, . _ - only)."
     exit 1
 fi
+if [ -n "$API_BIND" ] && ! echo "$API_BIND" | grep -Eq '^[A-Za-z0-9.:_-]+$'; then
+    log_err "Invalid --api-bind: ${API_BIND} (expected an IP or hostname)."
+    exit 1
+fi
 
 if [ -n "$PROXY" ]; then
     if ! echo "$PROXY" | grep -Eq '^[A-Za-z0-9.:_-]+:[0-9]{1,5}$'; then
