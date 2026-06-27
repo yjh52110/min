@@ -202,6 +202,18 @@ bash "${INSTALL_DIR}/scripts/auto-optimize.sh" "${OPT_ARGS[@]}"
 # have systemctl present but no running systemd (/run/systemd/system absent),
 # where `systemctl enable` fails with "Failed to connect to bus".
 log_title "Starting Miner Service"
+
+# Stop any miner already running so we don't end up with multiple xmrig
+# instances connecting as the same worker (doubles the proxy's hash counter).
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl stop xmrig 2>/dev/null || true
+fi
+if pgrep -f "${INSTALL_DIR}/xmrig/xmrig" >/dev/null 2>&1; then
+    log_warn "Stopping previously running xmrig instance(s) to avoid duplicates."
+    pkill -f "${INSTALL_DIR}/xmrig/xmrig" 2>/dev/null || true
+    sleep 2
+fi
+
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 \
         && [ -f /etc/systemd/system/xmrig.service ]; then
     systemctl daemon-reload
