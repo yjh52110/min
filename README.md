@@ -27,3 +27,12 @@ Transfer the APK file to your Android device and install it (enable "Install fro
 - Download page: https://www.grass.io/download
 - Documentation: https://grass-foundation.gitbook.io/grass-docs
 - Google Play: https://play.google.com/store/apps/details?id=io.getgrass.www
+
+## XMR Monero Mining Toolkit
+
+Full XMR mining toolkit with auto-optimization for small servers. See [xmr-mining/README.md](xmr-mining/README.md) for details.
+
+- **XMRig v6.26.0** — CPU miner (Linux static binary)
+- **XMRig Proxy v6.26.0** — Central relay node with worker monitoring API
+- **XMRig Workers Dashboard** — Web UI to view per-worker hashrate & online status
+- **Auto-Optimize Script** — Detects CPU (AVX/AVX2/AES-NI/SSE, Intel/AMD), cache, memory and generates optimized config for 2-4 core VPS

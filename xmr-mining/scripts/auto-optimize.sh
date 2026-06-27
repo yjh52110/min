@@ -1,0 +1,402 @@
+#!/bin/bash
+#
+# XMRig Auto-Optimization Script for Small Servers
+# Targets: 2-4 vCPU, 2-8GB RAM (VPS / Cloud Servers)
+# Detects CPU features (AVX/AVX2/AES-NI/SSE), cache sizes, Intel/AMD,
+# and generates an optimized xmrig config.json
+#
+
+set -e
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+XMRIG_DIR="$(cd "$(dirname "$0")/../xmrig" && pwd)"
+CONFIG_FILE="${XMRIG_DIR}/config.json"
+
+log_info()  { echo -e "${GREEN}[INFO]${NC}  $1"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $1"; }
+log_err()   { echo -e "${RED}[ERROR]${NC} $1"; }
+log_title() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
+
+# ─── 1. Detect CPU Info ───────────────────────────────────────────
+
+log_title "CPU Detection"
+
+CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+CPU_CORES=$(nproc)
+CPU_THREADS=$(grep -c ^processor /proc/cpuinfo)
+CPU_VENDOR=$(grep -m1 'vendor_id' /proc/cpuinfo | cut -d: -f2 | xargs)
+
+# Cache detection
+L1_CACHE=$(lscpu | grep 'L1d' | head -1 | awk '{print $NF}')
+L2_CACHE=$(lscpu | grep 'L2' | head -1 | awk '{print $NF}')
+L3_CACHE=$(lscpu | grep 'L3' | head -1 | awk '{print $NF}')
+
+# CPU flags
+CPU_FLAGS=$(grep -m1 'flags' /proc/cpuinfo | cut -d: -f2)
+HAS_AES=$(echo "$CPU_FLAGS" | grep -qw 'aes' && echo "true" || echo "false")
+HAS_AVX=$(echo "$CPU_FLAGS" | grep -qw 'avx' && echo "true" || echo "false")
+HAS_AVX2=$(echo "$CPU_FLAGS" | grep -qw 'avx2' && echo "true" || echo "false")
+HAS_AVX512=$(echo "$CPU_FLAGS" | grep -qw 'avx512f' && echo "true" || echo "false")
+HAS_SSE41=$(echo "$CPU_FLAGS" | grep -qw 'sse4_1' && echo "true" || echo "false")
+HAS_PDPE1GB=$(echo "$CPU_FLAGS" | grep -qw 'pdpe1gb' && echo "true" || echo "false")
+
+# Memory
+TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+TOTAL_MEM_MB=$((TOTAL_MEM_KB / 1024))
+TOTAL_MEM_GB=$((TOTAL_MEM_MB / 1024))
+
+log_info "CPU Model:    ${CPU_MODEL}"
+log_info "Vendor:       ${CPU_VENDOR}"
+log_info "Cores/Threads:${CPU_CORES} / ${CPU_THREADS}"
+log_info "L1d Cache:    ${L1_CACHE:-N/A}"
+log_info "L2 Cache:     ${L2_CACHE:-N/A}"
+log_info "L3 Cache:     ${L3_CACHE:-N/A}"
+log_info "AES-NI:       ${HAS_AES}"
+log_info "AVX:          ${HAS_AVX}"
+log_info "AVX2:         ${HAS_AVX2}"
+log_info "AVX-512:      ${HAS_AVX512}"
+log_info "SSE4.1:       ${HAS_SSE41}"
+log_info "Memory:       ${TOTAL_MEM_MB} MB (${TOTAL_MEM_GB} GB)"
+
+# ─── 2. Calculate Optimal Mining Threads ──────────────────────────
+
+log_title "Thread Optimization"
+
+# RandomX requires 2MB L3 cache per thread
+# Parse L3 cache size to MB
+parse_cache_mb() {
+    local val="$1"
+    if echo "$val" | grep -qi 'MiB\|MB'; then
+        echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1
+    elif echo "$val" | grep -qi 'KiB\|KB'; then
+        local kb=$(echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1)
+        echo $((kb / 1024))
+    elif echo "$val" | grep -qi 'GiB\|GB'; then
+        local gb=$(echo "$val" | grep -oP '[0-9.]+' | head -1 | cut -d. -f1)
+        echo $((gb * 1024))
+    else
+        echo "$val" | grep -oP '[0-9]+' | head -1
+    fi
+}
+
+L3_MB=$(parse_cache_mb "${L3_CACHE}")
+if [ -z "$L3_MB" ] || [ "$L3_MB" -eq 0 ] 2>/dev/null; then
+    L3_MB=4
+    log_warn "Could not detect L3 cache, assuming ${L3_MB} MB"
+fi
+
+# RandomX needs 2MB per thread
+MAX_THREADS_BY_CACHE=$((L3_MB / 2))
+
+# Reserve at least 512MB for OS, rest for mining (each thread uses ~2.5MB for dataset pages)
+AVAILABLE_MEM_MB=$((TOTAL_MEM_MB - 512))
+MAX_THREADS_BY_MEM=$((AVAILABLE_MEM_MB / 3))
+
+# Don't exceed CPU thread count
+OPTIMAL_THREADS=$CPU_THREADS
+if [ "$MAX_THREADS_BY_CACHE" -lt "$OPTIMAL_THREADS" ]; then
+    OPTIMAL_THREADS=$MAX_THREADS_BY_CACHE
+fi
+if [ "$MAX_THREADS_BY_MEM" -lt "$OPTIMAL_THREADS" ]; then
+    OPTIMAL_THREADS=$MAX_THREADS_BY_MEM
+fi
+# At least 1 thread
+if [ "$OPTIMAL_THREADS" -lt 1 ]; then
+    OPTIMAL_THREADS=1
+fi
+
+# For very small VPS (2 cores), use all cores
+# For 4+ cores, leave 1 for system
+if [ "$CPU_THREADS" -gt 3 ] && [ "$OPTIMAL_THREADS" -ge "$CPU_THREADS" ]; then
+    OPTIMAL_THREADS=$((CPU_THREADS - 1))
+fi
+
+log_info "L3 Cache:          ${L3_MB} MB"
+log_info "Max by cache (2MB/thread): ${MAX_THREADS_BY_CACHE}"
+log_info "Max by memory:     ${MAX_THREADS_BY_MEM}"
+log_info "Optimal threads:   ${OPTIMAL_THREADS}"
+
+# ─── 3. Enable Huge Pages ────────────────────────────────────────
+
+log_title "Huge Pages Setup"
+
+# RandomX benefits greatly from 2MB huge pages
+HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))  # threads + dataset pages overhead
+
+if [ "$(id -u)" -eq 0 ]; then
+    # Enable huge pages
+    sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED} >/dev/null 2>&1 || true
+    CURRENT_HP=$(cat /proc/sys/vm/nr_hugepages)
+    log_info "Huge pages set to: ${CURRENT_HP}"
+
+    # Make persistent
+    if ! grep -q 'vm.nr_hugepages' /etc/sysctl.conf 2>/dev/null; then
+        echo "vm.nr_hugepages=${HUGEPAGES_NEEDED}" >> /etc/sysctl.conf
+        log_info "Added vm.nr_hugepages=${HUGEPAGES_NEEDED} to /etc/sysctl.conf"
+    else
+        sed -i "s/vm.nr_hugepages=.*/vm.nr_hugepages=${HUGEPAGES_NEEDED}/" /etc/sysctl.conf
+        log_info "Updated vm.nr_hugepages in /etc/sysctl.conf"
+    fi
+
+    # 1GB huge pages for supported CPUs
+    if [ "$HAS_PDPE1GB" = "true" ] && [ "$TOTAL_MEM_GB" -ge 4 ]; then
+        log_info "CPU supports 1GB huge pages (pdpe1gb flag detected)"
+        log_info "For best performance, add 'hugepagesz=1G hugepages=3' to kernel boot params"
+    fi
+else
+    log_warn "Not running as root. Run with sudo for huge pages setup:"
+    log_warn "  sudo sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED}"
+fi
+
+# ─── 4. CPU Governor & Performance Tuning ─────────────────────────
+
+log_title "CPU Performance Tuning"
+
+if [ "$(id -u)" -eq 0 ]; then
+    # Set CPU governor to performance
+    if command -v cpufreq-set >/dev/null 2>&1; then
+        for i in $(seq 0 $((CPU_THREADS - 1))); do
+            cpufreq-set -c $i -g performance 2>/dev/null || true
+        done
+        log_info "CPU governor set to 'performance'"
+    elif [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
+        for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo performance > "$gov" 2>/dev/null || true
+        done
+        log_info "CPU governor set to 'performance'"
+    else
+        log_warn "Cannot set CPU governor (no cpufreq support, common on VPS)"
+    fi
+
+    # Disable transparent huge pages (can cause latency spikes)
+    if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+        echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+        log_info "Transparent Huge Pages disabled (reduces latency)"
+    fi
+
+    # Increase vm.max_map_count for RandomX
+    sysctl -w vm.max_map_count=262144 >/dev/null 2>&1 || true
+else
+    log_warn "Run as root for CPU governor and THP tuning"
+fi
+
+# ─── 5. Determine RandomX Mode ───────────────────────────────────
+
+log_title "RandomX Mode Selection"
+
+# fast mode needs ~2GB, light mode needs ~256MB
+if [ "$TOTAL_MEM_MB" -ge 2560 ]; then
+    RX_MODE="fast"
+    log_info "Mode: FAST (full 2GB dataset in memory - best hashrate)"
+else
+    RX_MODE="light"
+    log_info "Mode: LIGHT (256MB - lower hashrate but fits in low memory)"
+fi
+
+# ─── 6. Intel vs AMD Specific Tuning ──────────────────────────────
+
+log_title "Vendor-Specific Optimization"
+
+INTEL_SPECIFIC=""
+if echo "$CPU_VENDOR" | grep -qi "Intel"; then
+    log_info "Intel CPU detected - applying Intel optimizations"
+
+    # Intel CPUs benefit from specific affinity and NUMA settings
+    if [ "$HAS_AVX2" = "true" ]; then
+        log_info "  AVX2 enabled - XMRig will auto-use optimized code paths"
+    fi
+    if [ "$HAS_AVX512" = "true" ]; then
+        log_info "  AVX-512 detected - best RandomX performance tier"
+    fi
+    # Intel HT: use physical cores only for best per-thread hashrate
+    if [ "$CPU_THREADS" -gt "$CPU_CORES" ]; then
+        log_info "  Hyper-Threading detected: using ${CPU_CORES} physical cores (skip HT siblings)"
+        OPTIMAL_THREADS=$CPU_CORES
+        if [ "$OPTIMAL_THREADS" -gt 3 ]; then
+            OPTIMAL_THREADS=$((OPTIMAL_THREADS - 1))
+        fi
+    fi
+elif echo "$CPU_VENDOR" | grep -qi "AMD"; then
+    log_info "AMD CPU detected - applying AMD optimizations"
+    if [ "$HAS_AVX2" = "true" ]; then
+        log_info "  AVX2 enabled - good RandomX performance"
+    fi
+    # AMD Zen CPUs: each CCX has its own L3, keep threads within same CCX
+    log_info "  Tip: AMD Zen CPUs work best with threads pinned to same CCX"
+else
+    log_info "Unknown CPU vendor: ${CPU_VENDOR}"
+fi
+
+# ─── 7. Generate Optimized config.json ────────────────────────────
+
+log_title "Generating Optimized Config"
+
+# Build CPU thread list with affinity
+THREAD_LIST=""
+for i in $(seq 0 $((OPTIMAL_THREADS - 1))); do
+    if [ $i -gt 0 ]; then
+        THREAD_LIST="${THREAD_LIST}, "
+    fi
+    THREAD_LIST="${THREAD_LIST}${i}"
+done
+
+# Determine priority: small VPS use lower priority to avoid system lag
+if [ "$CPU_THREADS" -le 2 ]; then
+    PRIORITY=1
+elif [ "$CPU_THREADS" -le 4 ]; then
+    PRIORITY=2
+else
+    PRIORITY=3
+fi
+
+# MSR access for RandomX boost (Intel/AMD)
+MSR_ENABLED="true"
+if [ ! -e /dev/cpu/0/msr ] && [ "$(id -u)" -eq 0 ]; then
+    modprobe msr 2>/dev/null || MSR_ENABLED="false"
+fi
+
+cat > "${CONFIG_FILE}" << XMRIG_CONFIG
+{
+    "autosave": true,
+    "cpu": {
+        "enabled": true,
+        "huge-pages": true,
+        "huge-pages-jit": true,
+        "hw-aes": ${HAS_AES},
+        "priority": ${PRIORITY},
+        "memory-pool": true,
+        "yield": true,
+        "max-threads-hint": 100,
+        "asm": true,
+        "argon2-impl": null,
+        "rx": [${THREAD_LIST}],
+        "rx/wow": [${THREAD_LIST}]
+    },
+    "randomx": {
+        "init": -1,
+        "init-avx2": -1,
+        "mode": "${RX_MODE}",
+        "1gb-pages": ${HAS_PDPE1GB},
+        "rdmsr": ${MSR_ENABLED},
+        "wrmsr": ${MSR_ENABLED},
+        "cache_qos": false,
+        "numa": true,
+        "scratchpad_prefetch_mode": 1
+    },
+    "pools": [
+        {
+            "url": "pool.supportxmr.com:443",
+            "user": "YOUR_XMR_WALLET_ADDRESS",
+            "pass": "worker1",
+            "rig-id": "vps-$(hostname | tr '[:upper:]' '[:lower:]')",
+            "keepalive": true,
+            "tls": true,
+            "sni": true
+        },
+        {
+            "url": "gulf.moneroocean.stream:443",
+            "user": "YOUR_XMR_WALLET_ADDRESS",
+            "pass": "worker1",
+            "rig-id": "vps-$(hostname | tr '[:upper:]' '[:lower:]')",
+            "keepalive": true,
+            "tls": true,
+            "algo": null
+        }
+    ],
+    "donate-level": 1,
+    "donate-over-proxy": 1,
+    "log-file": "xmrig.log",
+    "print-time": 60,
+    "retries": 5,
+    "retry-pause": 5,
+    "syslog": false,
+    "http": {
+        "enabled": true,
+        "host": "0.0.0.0",
+        "port": 4040,
+        "access-token": null,
+        "restricted": true
+    }
+}
+XMRIG_CONFIG
+
+log_info "Config written to: ${CONFIG_FILE}"
+
+# ─── 8. Generate systemd Service ──────────────────────────────────
+
+log_title "Systemd Service"
+
+SERVICE_FILE="/tmp/xmrig.service"
+cat > "${SERVICE_FILE}" << SYSTEMD_SERVICE
+[Unit]
+Description=XMRig Monero Miner
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED} || true'
+ExecStart=${XMRIG_DIR}/xmrig --config=${CONFIG_FILE}
+Restart=always
+RestartSec=15
+Nice=-10
+CPUWeight=90
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD_SERVICE
+
+if [ "$(id -u)" -eq 0 ]; then
+    cp "${SERVICE_FILE}" /etc/systemd/system/xmrig.service
+    log_info "Systemd service installed: /etc/systemd/system/xmrig.service"
+    log_info "Enable with: systemctl enable --now xmrig"
+else
+    log_info "Systemd service file generated at: ${SERVICE_FILE}"
+    log_warn "Run as root to install: sudo cp ${SERVICE_FILE} /etc/systemd/system/"
+fi
+
+# ─── 9. Summary ──────────────────────────────────────────────────
+
+log_title "Optimization Summary"
+
+echo ""
+echo "  CPU:              ${CPU_MODEL}"
+echo "  Vendor:           ${CPU_VENDOR}"
+echo "  Mining Threads:   ${OPTIMAL_THREADS} / ${CPU_THREADS} available"
+echo "  RandomX Mode:     ${RX_MODE}"
+echo "  Huge Pages:       ${HUGEPAGES_NEEDED} (2MB pages)"
+echo "  1GB Pages:        ${HAS_PDPE1GB}"
+echo "  AES-NI:           ${HAS_AES}"
+echo "  AVX/AVX2/AVX512:  ${HAS_AVX} / ${HAS_AVX2} / ${HAS_AVX512}"
+echo "  Memory:           ${TOTAL_MEM_MB} MB"
+echo "  Thread Priority:  ${PRIORITY}"
+echo "  Config:           ${CONFIG_FILE}"
+echo ""
+
+# Estimated hashrate ranges
+if [ "$HAS_AVX2" = "true" ] && [ "$RX_MODE" = "fast" ]; then
+    HR_LOW=$((OPTIMAL_THREADS * 600))
+    HR_HIGH=$((OPTIMAL_THREADS * 1200))
+elif [ "$HAS_AES" = "true" ] && [ "$RX_MODE" = "fast" ]; then
+    HR_LOW=$((OPTIMAL_THREADS * 400))
+    HR_HIGH=$((OPTIMAL_THREADS * 800))
+else
+    HR_LOW=$((OPTIMAL_THREADS * 200))
+    HR_HIGH=$((OPTIMAL_THREADS * 500))
+fi
+
+log_info "Estimated hashrate: ${HR_LOW} - ${HR_HIGH} H/s"
+echo ""
+log_info "Next steps:"
+echo "  1. Edit ${CONFIG_FILE}"
+echo "     Replace YOUR_XMR_WALLET_ADDRESS with your Monero wallet address"
+echo "  2. Extract xmrig binary:"
+echo "     cd ${XMRIG_DIR} && tar xzf xmrig-*.tar.gz --strip-components=1"
+echo "  3. Run: ${XMRIG_DIR}/xmrig"
+echo "  4. Or install service: sudo systemctl enable --now xmrig"
+echo ""
