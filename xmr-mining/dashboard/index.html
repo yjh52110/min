@@ -49,7 +49,6 @@
   #copyBtn.done{background:var(--green);color:#04210d}
   .install-hint{color:var(--muted);font-size:12px;margin-top:8px}
   .install-hint code{background:#0b0f14;padding:1px 5px;border-radius:4px}
-  .card .hint{color:var(--accent);font-size:11px;margin-top:6px;line-height:1.3}
 </style>
 </head>
 <body>
@@ -70,7 +69,7 @@
   </div>
 
   <div class="cards">
-    <div class="card"><div class="label">总算力</div><div class="value" id="hrTotal">—</div><div class="hint" id="hrHint"></div></div>
+    <div class="card"><div class="label">总算力</div><div class="value" id="hrTotal">—</div></div>
     <div class="card"><div class="label">在线节点</div><div class="value" id="online">—</div></div>
     <div class="card"><div class="label">有效份额</div><div class="value" id="accepted">—</div></div>
     <div class="card"><div class="label">拒绝份额</div><div class="value" id="rejected">—</div></div>
@@ -96,6 +95,22 @@
 const API = '/api';            // nginx reverse-proxies to the proxy (token added server-side)
 const REFRESH = 10000;
 const ONLINE_WINDOW = 10 * 60 * 1000; // last share within 10 min => online
+const HR_WINDOW = 3 * 60 * 1000;      // rolling window for the hashrate estimate
+
+// Stratum miners don't report their hashrate to the proxy, and the proxy's own
+// hashrate fields read ~0 for small workers. Derive a real rate from the proxy's
+// cumulative per-worker hash counter: Δhashes / Δt over a rolling window.
+const hashSamples = {};
+function workerHashrate(name, hashes, nowMs){
+  let s = hashSamples[name];
+  if(!s || hashes < s[s.length-1].h) s = [];   // reset on reconnect / proxy restart
+  s.push({t: nowMs, h: hashes});
+  while(s.length > 2 && nowMs - s[0].t > HR_WINDOW) s.shift();
+  hashSamples[name] = s;
+  const first = s[0], last = s[s.length-1];
+  const dt = (last.t - first.t) / 1000;
+  return dt > 0 ? (last.h - first.h) / dt : 0;
+}
 
 function fmtHr(h){
   h = +h || 0;
@@ -141,19 +156,12 @@ async function tick(){
 
   try{
     const summary = await getJSON('/1/summary');
-    const hr = (summary.hashrate && summary.hashrate.total) ? summary.hashrate.total[0] : 0;
-    document.getElementById('hrTotal').textContent = fmtHr(hr);
     const res = summary.results || {};
     document.getElementById('accepted').textContent = res.accepted ?? '—';
     document.getElementById('rejected').textContent = res.rejected ?? '—';
     const miners = summary.miners || {};
     document.getElementById('miners').textContent =
       (miners.now ?? 0) + (miners.max != null ? ' / ' + miners.max : '');
-    // The proxy infers hashrate from submitted shares, so it reads ~0 for the
-    // first 10-15 min after a miner connects. Explain this instead of alarming.
-    const warming = (miners.now ?? 0) > 0 && (res.accepted ?? 0) > 0 && (+hr || 0) < 10;
-    document.getElementById('hrHint').textContent =
-      warming ? '中心节点按份额估算，约 10-15 分钟后稳定；矿机实时算力见本机日志' : '';
   }catch(e){ ok = false; }
 
   try{
@@ -161,15 +169,16 @@ async function tick(){
     // Each row: [name, ip, conns, accepted, rejected, invalid, hashes, lastHash, hr1, hr2, ...]
     const list = (workers.workers || []);
     const tbody = document.getElementById('rows');
-    let onlineCount = 0;
+    let onlineCount = 0, totalHr = 0;
+    const now = Date.now();
     if(list.length === 0){
       tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无子节点连接。用 install-worker.sh 在子节点上一键安装即可。</td></tr>';
     } else {
       tbody.innerHTML = list.map(w => {
         const name=w[0], ip=w[1], acc=w[3], rej=w[4], lastHash=toMs(w[7]);
-        const whr = w.length>8 ? w[8] : 0;
-        const online = lastHash && (Date.now()-lastHash) < ONLINE_WINDOW;
-        if(online) onlineCount++;
+        const whr = workerHashrate(name, +w[6] || 0, now);
+        const online = lastHash && (now-lastHash) < ONLINE_WINDOW;
+        if(online){ onlineCount++; totalHr += whr; }
         return `<tr>
           <td><span class="dot ${online?'on':'off'}"></span><span class="${online?'status-on':'status-off'}">${online?'在线':'离线'}</span></td>
           <td>${name?esc(name):'(未命名)'}</td>
@@ -182,6 +191,7 @@ async function tick(){
       }).join('');
     }
     document.getElementById('online').textContent = onlineCount + ' / ' + list.length;
+    document.getElementById('hrTotal').textContent = fmtHr(totalHr);
   }catch(e){ ok = false; }
 
   if(ok){

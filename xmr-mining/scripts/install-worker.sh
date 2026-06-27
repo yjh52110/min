@@ -34,6 +34,7 @@ XMRIG_SHA256="${XMRIG_SHA256:-fc6f8ae5f64e4f17481f7e3be29a1c56949f216a9984141880
 PROXY="${PROXY:-}"
 WALLET="${WALLET:-}"
 WORKER_NAME="${WORKER_NAME:-}"
+THREADS="${THREADS:-}"
 
 usage() {
     cat <<USAGE
@@ -46,6 +47,7 @@ Options:
                         Wallet lives on the proxy, so none is needed here.
   -w, --wallet ADDR     Mine directly to this Monero wallet (no proxy).
   -n, --worker NAME     Worker / rig name (default: vps-<hostname>).
+  -t, --threads N|max   Force mining thread count ('max' = all logical CPUs).
       --dir PATH        Install directory (default: /opt/xmr-worker).
       --repo OWNER/REPO Source repo (default: yjh52110/min).
       --branch NAME     Source branch (default: main).
@@ -60,6 +62,7 @@ while [ $# -gt 0 ]; do
         -p|--proxy)   PROXY="$2"; shift 2;;
         -w|--wallet)  WALLET="$2"; shift 2;;
         -n|--worker)  WORKER_NAME="$2"; shift 2;;
+        -t|--threads) THREADS="$2"; shift 2;;
         --dir)        INSTALL_DIR="$2"; shift 2;;
         --repo)       REPO="$2"; shift 2;;
         --branch)     BRANCH="$2"; shift 2;;
@@ -188,6 +191,9 @@ fi
 if [ -n "$WORKER_NAME" ]; then
     OPT_ARGS+=(--worker "$WORKER_NAME")
 fi
+if [ -n "$THREADS" ]; then
+    OPT_ARGS+=(--threads "$THREADS")
+fi
 
 bash "${INSTALL_DIR}/scripts/auto-optimize.sh" "${OPT_ARGS[@]}"
 
@@ -202,12 +208,12 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 \
     systemctl enable --now xmrig
     sleep 2
     systemctl --no-pager --full status xmrig | head -12 || true
-    log_info "Miner service started. Logs: journalctl -u xmrig -f"
+    log_info "Miner service started. Speed log: tail -f ${INSTALL_DIR}/xmrig/xmrig.log (or journalctl -u xmrig -f)"
 else
     log_warn "systemd not available (container/WSL?); starting xmrig in background instead."
     nohup "${INSTALL_DIR}/xmrig/xmrig" --config="${INSTALL_DIR}/xmrig/config.json" \
         >"${INSTALL_DIR}/xmrig/xmrig.out" 2>&1 &
-    log_info "Started in background (PID $!). Logs: tail -f ${INSTALL_DIR}/xmrig/xmrig.out"
+    log_info "Started in background (PID $!). Speed log: tail -f ${INSTALL_DIR}/xmrig/xmrig.log"
     log_warn "No systemd: the miner will NOT auto-start after reboot."
     log_warn "Re-run to restart: nohup ${INSTALL_DIR}/xmrig/xmrig --config=${INSTALL_DIR}/xmrig/config.json >${INSTALL_DIR}/xmrig/xmrig.out 2>&1 &"
 fi
