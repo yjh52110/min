@@ -19,7 +19,63 @@ log_title() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 PROXY_DIR="$(cd "$(dirname "$0")/../xmrig-proxy" && pwd)"
 PROXY_CONFIG="${PROXY_DIR}/config.json"
 
+# ─── 0. Parse Arguments ───────────────────────────────────────────
+
+WALLET="${WALLET:-}"
+WORKER_PORT="${WORKER_PORT:-3333}"
+API_PORT="${API_PORT:-4048}"
+API_BIND="${API_BIND:-0.0.0.0}"
+API_TOKEN="${API_TOKEN:-}"
+API_RESTRICTED="${API_RESTRICTED:-true}"
+
+usage() {
+    cat <<USAGE
+Usage: bash setup-proxy.sh [options]
+
+Options:
+  -w, --wallet ADDR    Monero wallet address (or set WALLET env var). Required.
+                       All workers' hashrate is credited to this address.
+      --port PORT      Port workers connect to (default: 3333).
+      --api-port PORT  HTTP monitoring API port (default: 4048).
+      --api-bind ADDR  Address the API binds to (default: 0.0.0.0).
+                       Use 127.0.0.1 if you reverse-proxy it via nginx.
+      --api-token TOK  API bearer token (default: auto-generated).
+      --api-writable   Allow config changes via the API (default: read-only).
+  -h, --help           Show this help.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -w|--wallet)   WALLET="$2"; shift 2;;
+        --port)        WORKER_PORT="$2"; shift 2;;
+        --api-port)    API_PORT="$2"; shift 2;;
+        --api-bind)    API_BIND="$2"; shift 2;;
+        --api-token)   API_TOKEN="$2"; shift 2;;
+        --api-writable) API_RESTRICTED="false"; shift;;
+        -h|--help)     usage; exit 0;;
+        *) echo "Unknown option: $1"; usage; exit 1;;
+    esac
+done
+
+validate_wallet() {
+    local addr="${1%%[.+]*}"
+    echo "$addr" | grep -Eq '^[48][0-9A-Za-z]{94}$'
+}
+
 log_title "XMRig Proxy Setup"
+
+if [ -z "$WALLET" ]; then
+    log_warn "No wallet address provided — pass --wallet ADDR or set WALLET env var."
+    log_warn "All worker hashrate is credited to the proxy's wallet."
+    exit 1
+fi
+if ! validate_wallet "$WALLET"; then
+    log_warn "Invalid Monero wallet address: ${WALLET}"
+    log_warn "Expected 95 base58 chars starting with 4 (standard) or 8 (subaddress)."
+    exit 1
+fi
+log_info "Wallet address validated"
 
 # ─── 1. Extract binary ───────────────────────────────────────────
 
@@ -33,9 +89,11 @@ fi
 
 log_title "Generating Proxy Config"
 
-WORKER_PORT=3333
-API_PORT=4048
-ACCESS_TOKEN="xmr-proxy-$(head -c 8 /dev/urandom | xxd -p)"
+if [ -z "$API_TOKEN" ]; then
+    ACCESS_TOKEN="xmr-proxy-$(head -c 8 /dev/urandom | xxd -p)"
+else
+    ACCESS_TOKEN="$API_TOKEN"
+fi
 
 cat > "${PROXY_CONFIG}" << PROXY_CFG
 {
@@ -56,7 +114,7 @@ cat > "${PROXY_CONFIG}" << PROXY_CFG
     "pools": [
         {
             "url": "pool.supportxmr.com:443",
-            "user": "YOUR_XMR_WALLET_ADDRESS",
+            "user": "${WALLET}",
             "pass": "proxy1",
             "rig-id": "proxy-main",
             "keepalive": true,
@@ -64,7 +122,7 @@ cat > "${PROXY_CONFIG}" << PROXY_CFG
         },
         {
             "url": "gulf.moneroocean.stream:443",
-            "user": "YOUR_XMR_WALLET_ADDRESS",
+            "user": "${WALLET}",
             "pass": "proxy1",
             "rig-id": "proxy-main",
             "keepalive": true,
@@ -74,10 +132,10 @@ cat > "${PROXY_CONFIG}" << PROXY_CFG
     ],
     "http": {
         "enabled": true,
-        "host": "0.0.0.0",
+        "host": "${API_BIND}",
         "port": ${API_PORT},
         "access-token": "${ACCESS_TOKEN}",
-        "restricted": false
+        "restricted": ${API_RESTRICTED}
     },
     "workers": true,
     "mode": "nicehash",
@@ -155,10 +213,10 @@ echo ""
 # ─── 6. Next steps ───────────────────────────────────────────────
 
 log_title "Next Steps"
-echo "  1. Edit ${PROXY_CONFIG}"
-echo "     Replace YOUR_XMR_WALLET_ADDRESS with your Monero wallet"
-echo "  2. Run: ${PROXY_DIR}/xmrig-proxy --config=${PROXY_CONFIG}"
-echo "  3. Connect workers to PROXY_IP:${WORKER_PORT}"
-echo "  4. Monitor at: http://PROXY_IP:${API_PORT}"
-echo "  5. Open the Workers Dashboard in browser for visual monitoring"
+echo "  1. Run: ${PROXY_DIR}/xmrig-proxy --config=${PROXY_CONFIG}"
+echo "  2. Connect workers to PROXY_IP:${WORKER_PORT}"
+echo "  3. Monitor at: http://PROXY_IP:${API_PORT}"
+echo "  4. Open the Workers Dashboard in browser for visual monitoring"
+echo ""
+log_info "Wallet/pool already written to config — no manual editing needed."
 echo ""

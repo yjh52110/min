@@ -22,6 +22,75 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_err()   { echo -e "${RED}[ERROR]${NC} $1"; }
 log_title() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 
+# ─── 0. Parse Arguments ───────────────────────────────────────────
+
+WALLET="${WALLET:-}"
+PROXY="${PROXY:-}"
+WORKER_NAME="${WORKER_NAME:-}"
+API_BIND="${API_BIND:-127.0.0.1}"
+API_TOKEN="${API_TOKEN:-}"
+
+usage() {
+    cat <<USAGE
+Usage: sudo bash auto-optimize.sh [options]
+
+Options:
+  -w, --wallet ADDR     Monero wallet address (or set WALLET env var).
+                        Required unless --proxy is used.
+  -p, --proxy IP:PORT   Mine through an XMRig-Proxy central node instead of
+                        public pools. The wallet lives on the proxy, so no
+                        wallet is needed in this mode.
+  -n, --worker NAME     Worker / rig name (default: vps-<hostname>).
+      --api-bind ADDR   Address the local HTTP API binds to
+                        (default: 127.0.0.1; use 0.0.0.0 to expose it).
+      --api-token TOK   Bearer token protecting the HTTP API
+                        (default: none; strongly recommended with 0.0.0.0).
+  -h, --help            Show this help.
+
+Examples:
+  sudo bash auto-optimize.sh --wallet 4AbC...xyz
+  sudo WALLET=4AbC...xyz bash auto-optimize.sh
+  sudo bash auto-optimize.sh --proxy 10.0.0.5:3333 --worker vps-tokyo
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -w|--wallet)  WALLET="$2"; shift 2;;
+        -p|--proxy)   PROXY="$2"; shift 2;;
+        -n|--worker)  WORKER_NAME="$2"; shift 2;;
+        --api-bind)   API_BIND="$2"; shift 2;;
+        --api-token)  API_TOKEN="$2"; shift 2;;
+        -h|--help)    usage; exit 0;;
+        *) log_err "Unknown option: $1"; usage; exit 1;;
+    esac
+done
+
+# Validate a Monero address: standard ('4') or subaddress ('8'), 95 base58
+# chars. Strips any pool worker suffix (".name" or "+diff") before checking.
+validate_wallet() {
+    local addr="${1%%[.+]*}"
+    echo "$addr" | grep -Eq '^[48][0-9A-Za-z]{94}$'
+}
+
+if [ -n "$PROXY" ]; then
+    log_info "Proxy mode: worker will connect to ${PROXY} (wallet held by proxy)"
+else
+    if [ -z "$WALLET" ]; then
+        log_err "No wallet address provided."
+        log_err "Pass --wallet ADDR (or WALLET=... env var), or use --proxy IP:PORT."
+        echo ""
+        usage
+        exit 1
+    fi
+    if ! validate_wallet "$WALLET"; then
+        log_err "Invalid Monero wallet address: ${WALLET}"
+        log_err "Expected 95 base58 chars starting with 4 (standard) or 8 (subaddress)."
+        exit 1
+    fi
+    log_info "Wallet address validated"
+fi
+
 # ─── 1. Detect CPU Info ───────────────────────────────────────────
 
 log_title "CPU Detection"
@@ -260,6 +329,57 @@ if [ ! -e /dev/cpu/0/msr ] && [ "$(id -u)" -eq 0 ]; then
     modprobe msr 2>/dev/null || MSR_ENABLED="false"
 fi
 
+# Rig / worker name and pool list (direct pools or proxy)
+RIG_ID="${WORKER_NAME:-vps-$(hostname | tr '[:upper:]' '[:lower:]')}"
+
+if [ -n "$PROXY" ]; then
+    POOLS_JSON=$(cat <<POOLS
+        {
+            "url": "${PROXY}",
+            "user": "${RIG_ID}",
+            "pass": "x",
+            "rig-id": "${RIG_ID}",
+            "keepalive": true,
+            "tls": false
+        }
+POOLS
+)
+else
+    POOLS_JSON=$(cat <<POOLS
+        {
+            "url": "pool.supportxmr.com:443",
+            "user": "${WALLET}",
+            "pass": "${RIG_ID}",
+            "rig-id": "${RIG_ID}",
+            "keepalive": true,
+            "tls": true,
+            "sni": true
+        },
+        {
+            "url": "gulf.moneroocean.stream:443",
+            "user": "${WALLET}",
+            "pass": "${RIG_ID}",
+            "rig-id": "${RIG_ID}",
+            "keepalive": true,
+            "tls": true,
+            "algo": null
+        }
+POOLS
+)
+fi
+
+# HTTP API access token (null = no token)
+if [ -n "$API_TOKEN" ]; then
+    API_TOKEN_JSON="\"${API_TOKEN}\""
+else
+    API_TOKEN_JSON="null"
+fi
+
+if [ "$API_BIND" = "0.0.0.0" ] && [ -z "$API_TOKEN" ]; then
+    log_warn "HTTP API bound to 0.0.0.0 with no token — anyone can read it."
+    log_warn "Pass --api-token TOKEN to protect it, or keep the default 127.0.0.1 bind."
+fi
+
 cat > "${CONFIG_FILE}" << XMRIG_CONFIG
 {
     "autosave": true,
@@ -289,24 +409,7 @@ cat > "${CONFIG_FILE}" << XMRIG_CONFIG
         "scratchpad_prefetch_mode": 1
     },
     "pools": [
-        {
-            "url": "pool.supportxmr.com:443",
-            "user": "YOUR_XMR_WALLET_ADDRESS",
-            "pass": "worker1",
-            "rig-id": "vps-$(hostname | tr '[:upper:]' '[:lower:]')",
-            "keepalive": true,
-            "tls": true,
-            "sni": true
-        },
-        {
-            "url": "gulf.moneroocean.stream:443",
-            "user": "YOUR_XMR_WALLET_ADDRESS",
-            "pass": "worker1",
-            "rig-id": "vps-$(hostname | tr '[:upper:]' '[:lower:]')",
-            "keepalive": true,
-            "tls": true,
-            "algo": null
-        }
+${POOLS_JSON}
     ],
     "donate-level": 1,
     "donate-over-proxy": 1,
@@ -317,9 +420,9 @@ cat > "${CONFIG_FILE}" << XMRIG_CONFIG
     "syslog": false,
     "http": {
         "enabled": true,
-        "host": "0.0.0.0",
+        "host": "${API_BIND}",
         "port": 4040,
-        "access-token": null,
+        "access-token": ${API_TOKEN_JSON},
         "restricted": true
     }
 }
@@ -375,6 +478,12 @@ echo "  AES-NI:           ${HAS_AES}"
 echo "  AVX/AVX2/AVX512:  ${HAS_AVX} / ${HAS_AVX2} / ${HAS_AVX512}"
 echo "  Memory:           ${TOTAL_MEM_MB} MB"
 echo "  Thread Priority:  ${PRIORITY}"
+if [ -n "$PROXY" ]; then
+echo "  Mining target:    proxy ${PROXY} (worker: ${RIG_ID})"
+else
+echo "  Mining target:    public pools (wallet: ${WALLET})"
+fi
+echo "  HTTP API bind:    ${API_BIND}:4040"
 echo "  Config:           ${CONFIG_FILE}"
 echo ""
 
@@ -393,10 +502,15 @@ fi
 log_info "Estimated hashrate: ${HR_LOW} - ${HR_HIGH} H/s"
 echo ""
 log_info "Next steps:"
-echo "  1. Edit ${CONFIG_FILE}"
-echo "     Replace YOUR_XMR_WALLET_ADDRESS with your Monero wallet address"
-echo "  2. Extract xmrig binary:"
+if [ ! -x "${XMRIG_DIR}/xmrig" ]; then
+echo "  1. Extract xmrig binary:"
 echo "     cd ${XMRIG_DIR} && tar xzf xmrig-*.tar.gz --strip-components=1"
-echo "  3. Run: ${XMRIG_DIR}/xmrig"
-echo "  4. Or install service: sudo systemctl enable --now xmrig"
+echo "  2. Run: ${XMRIG_DIR}/xmrig"
+echo "  3. Or install service: sudo systemctl enable --now xmrig"
+else
+echo "  1. Run: ${XMRIG_DIR}/xmrig"
+echo "  2. Or install service: sudo systemctl enable --now xmrig"
+fi
+echo ""
+log_info "Wallet/pool already written to config — no manual editing needed."
 echo ""

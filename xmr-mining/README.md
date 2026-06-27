@@ -14,8 +14,23 @@ xmr-mining/
 │   └── public/                     # Static files, serve with nginx
 └── scripts/
     ├── auto-optimize.sh            # Auto CPU/memory optimization for VPS
-    └── setup-proxy.sh              # Quick proxy setup with monitoring API
+    ├── setup-proxy.sh              # Quick proxy setup with monitoring API
+    └── install-worker.sh          # One-line installer for sub-nodes
 ```
+
+## One-Line Worker Install (Sub-Nodes)
+
+On any fresh Linux sub-node, install + auto-tune + connect to the central
+proxy + register a systemd service in a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yjh52110/min/main/xmr-mining/scripts/install-worker.sh \
+  | sudo bash -s -- --proxy PROXY_IP:3333 --worker vps-tokyo
+```
+
+No wallet is needed on workers in proxy mode — the wallet lives on the proxy
+and all worker hashrate is credited to it. To mine directly to a wallet
+instead (no proxy), pass `--wallet 4Abc...xyz`.
 
 ## Quick Start
 
@@ -25,16 +40,18 @@ xmr-mining/
 cd xmrig
 tar xzf xmrig-6.26.0-linux-static-x64.tar.gz --strip-components=1
 
-# Auto-detect CPU features and generate optimized config
-sudo bash ../scripts/auto-optimize.sh
+# Auto-detect CPU features AND inject your wallet (validated) in one step
+sudo bash ../scripts/auto-optimize.sh --wallet 4Abc...your_xmr_wallet...xyz
 
-# Edit config - set your wallet address
-nano config.json
-# Change YOUR_XMR_WALLET_ADDRESS to your Monero wallet
+# Or connect this node to a central proxy instead (no wallet needed here):
+# sudo bash ../scripts/auto-optimize.sh --proxy PROXY_IP:3333 --worker vps-tokyo
 
-# Start mining
+# Start mining (wallet/pool already written to config.json)
 ./xmrig
 ```
+
+The HTTP API binds to `127.0.0.1` by default. Expose it with
+`--api-bind 0.0.0.0 --api-token YOUR_TOKEN` only if you need remote monitoring.
 
 ### 2. Setup Proxy (Central Node)
 
@@ -42,15 +59,16 @@ nano config.json
 cd xmrig-proxy
 tar xzf xmrig-proxy-6.26.0-linux-static-x64.tar.gz --strip-components=1
 
-# Generate proxy config
-bash ../scripts/setup-proxy.sh
+# Generate proxy config with your wallet (validated, injected into all pools)
+bash ../scripts/setup-proxy.sh --wallet 4Abc...your_xmr_wallet...xyz
 
-# Edit config - set your wallet address
-nano config.json
-
-# Start proxy
+# Start proxy (wallet already written to config.json)
 ./xmrig-proxy
 ```
+
+The monitoring API is read-only by default (`restricted: true`) and uses an
+auto-generated bearer token. Pass `--api-writable` to allow remote config
+changes, or `--api-bind 127.0.0.1` to keep it local and reverse-proxy via nginx.
 
 ### 3. Connect Workers to Proxy
 
