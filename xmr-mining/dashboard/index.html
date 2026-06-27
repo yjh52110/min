@@ -65,7 +65,7 @@
       <code id="installCmd">加载中…</code>
       <button id="copyBtn" type="button">复制</button>
     </div>
-    <div class="install-hint">把 <code>--worker</code> 后面的名字改成你想要的节点名（每台用不同名字便于区分）。</div>
+    <div class="install-hint">不用填节点名：默认自动用 <code>vps-主机名</code>，每台机器名字唯一。想自定义可在末尾加 <code>--worker 名字</code>。<code>--threads max</code> 表示用满所有线程。</div>
   </div>
 
   <div class="cards">
@@ -208,7 +208,7 @@ async function tick(){
 const PROXY_HOST = location.hostname;
 const INSTALL_CMD =
   'curl -fsSL https://raw.githubusercontent.com/yjh52110/min/main/xmr-mining/scripts/install-worker.sh'
-  + ' | sudo bash -s -- --proxy ' + PROXY_HOST + ':3333 --worker vps-1';
+  + ' | sudo bash -s -- --proxy ' + PROXY_HOST + ':3333 --threads max';
 document.getElementById('installCmd').textContent = INSTALL_CMD;
 
 document.getElementById('copyBtn').addEventListener('click', async () => {
