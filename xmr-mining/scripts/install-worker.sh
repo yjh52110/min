@@ -191,19 +191,25 @@ fi
 
 bash "${INSTALL_DIR}/scripts/auto-optimize.sh" "${OPT_ARGS[@]}"
 
-# ─── 4. Enable & start systemd service ────────────────────────────
+# ─── 4. Start the miner ───────────────────────────────────────────
+# Use systemd only when it is actually the init system. Containers/LXC/WSL often
+# have systemctl present but no running systemd (/run/systemd/system absent),
+# where `systemctl enable` fails with "Failed to connect to bus".
 log_title "Starting Miner Service"
-if [ -f /etc/systemd/system/xmrig.service ]; then
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 \
+        && [ -f /etc/systemd/system/xmrig.service ]; then
     systemctl daemon-reload
     systemctl enable --now xmrig
     sleep 2
     systemctl --no-pager --full status xmrig | head -12 || true
     log_info "Miner service started. Logs: journalctl -u xmrig -f"
 else
-    log_warn "Service file not found; starting xmrig in background instead."
+    log_warn "systemd not available (container/WSL?); starting xmrig in background instead."
     nohup "${INSTALL_DIR}/xmrig/xmrig" --config="${INSTALL_DIR}/xmrig/config.json" \
         >"${INSTALL_DIR}/xmrig/xmrig.out" 2>&1 &
-    log_info "Started. Logs: ${INSTALL_DIR}/xmrig/xmrig.out"
+    log_info "Started in background (PID $!). Logs: tail -f ${INSTALL_DIR}/xmrig/xmrig.out"
+    log_warn "No systemd: the miner will NOT auto-start after reboot."
+    log_warn "Re-run to restart: nohup ${INSTALL_DIR}/xmrig/xmrig --config=${INSTALL_DIR}/xmrig/config.json >${INSTALL_DIR}/xmrig/xmrig.out 2>&1 &"
 fi
 
 log_title "Done"
