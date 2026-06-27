@@ -242,39 +242,7 @@ log_info "Max by cache (2MB/thread): ${MAX_THREADS_BY_CACHE}"
 log_info "Max by memory:     ${MAX_THREADS_BY_MEM}"
 log_info "Optimal threads:   ${OPTIMAL_THREADS}"
 
-# ─── 3. Enable Huge Pages ────────────────────────────────────────
-
-log_title "Huge Pages Setup"
-
-# RandomX benefits greatly from 2MB huge pages
-HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))  # threads + dataset pages overhead
-
-if [ "$(id -u)" -eq 0 ]; then
-    # Enable huge pages
-    sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED} >/dev/null 2>&1 || true
-    CURRENT_HP=$(cat /proc/sys/vm/nr_hugepages)
-    log_info "Huge pages set to: ${CURRENT_HP}"
-
-    # Make persistent
-    if ! grep -q 'vm.nr_hugepages' /etc/sysctl.conf 2>/dev/null; then
-        echo "vm.nr_hugepages=${HUGEPAGES_NEEDED}" >> /etc/sysctl.conf
-        log_info "Added vm.nr_hugepages=${HUGEPAGES_NEEDED} to /etc/sysctl.conf"
-    else
-        sed -i "s/vm.nr_hugepages=.*/vm.nr_hugepages=${HUGEPAGES_NEEDED}/" /etc/sysctl.conf
-        log_info "Updated vm.nr_hugepages in /etc/sysctl.conf"
-    fi
-
-    # 1GB huge pages for supported CPUs
-    if [ "$HAS_PDPE1GB" = "true" ] && [ "$TOTAL_MEM_GB" -ge 4 ]; then
-        log_info "CPU supports 1GB huge pages (pdpe1gb flag detected)"
-        log_info "For best performance, add 'hugepagesz=1G hugepages=3' to kernel boot params"
-    fi
-else
-    log_warn "Not running as root. Run with sudo for huge pages setup:"
-    log_warn "  sudo sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED}"
-fi
-
-# ─── 4. CPU Governor & Performance Tuning ─────────────────────────
+# ─── 3. CPU Governor & Performance Tuning ─────────────────────────
 
 log_title "CPU Performance Tuning"
 
@@ -306,7 +274,7 @@ else
     log_warn "Run as root for CPU governor and THP tuning"
 fi
 
-# ─── 5. Determine RandomX Mode ───────────────────────────────────
+# ─── 4. Determine RandomX Mode ───────────────────────────────────
 
 log_title "RandomX Mode Selection"
 
@@ -319,7 +287,7 @@ else
     log_info "Mode: LIGHT (256MB - lower hashrate but fits in low memory)"
 fi
 
-# ─── 6. Intel vs AMD Specific Tuning ──────────────────────────────
+# ─── 5. Intel vs AMD Specific Tuning ──────────────────────────────
 
 log_title "Vendor-Specific Optimization"
 
@@ -373,8 +341,42 @@ if [ -n "$THREADS" ]; then
         [ "$OPTIMAL_THREADS" -gt "$CPU_THREADS" ] && OPTIMAL_THREADS=$CPU_THREADS
         [ "$OPTIMAL_THREADS" -lt 1 ] && OPTIMAL_THREADS=1
     fi
-    HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))
     log_warn "Thread override: using ${OPTIMAL_THREADS} thread(s) (--threads ${THREADS}); RandomX may not scale past physical cores."
+fi
+
+# ─── 6. Enable Huge Pages ────────────────────────────────────────
+# Done after the thread count is final (auto + HT + --threads override) so the
+# persisted vm.nr_hugepages matches the threads we actually run, not a stale
+# pre-override value.
+
+log_title "Huge Pages Setup"
+
+# RandomX benefits greatly from 2MB huge pages
+HUGEPAGES_NEEDED=$((OPTIMAL_THREADS + 8))  # threads + dataset pages overhead
+
+if [ "$(id -u)" -eq 0 ]; then
+    # Enable huge pages
+    sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED} >/dev/null 2>&1 || true
+    CURRENT_HP=$(cat /proc/sys/vm/nr_hugepages)
+    log_info "Huge pages set to: ${CURRENT_HP}"
+
+    # Make persistent
+    if ! grep -q 'vm.nr_hugepages' /etc/sysctl.conf 2>/dev/null; then
+        echo "vm.nr_hugepages=${HUGEPAGES_NEEDED}" >> /etc/sysctl.conf
+        log_info "Added vm.nr_hugepages=${HUGEPAGES_NEEDED} to /etc/sysctl.conf"
+    else
+        sed -i "s/vm.nr_hugepages=.*/vm.nr_hugepages=${HUGEPAGES_NEEDED}/" /etc/sysctl.conf
+        log_info "Updated vm.nr_hugepages in /etc/sysctl.conf"
+    fi
+
+    # 1GB huge pages for supported CPUs
+    if [ "$HAS_PDPE1GB" = "true" ] && [ "$TOTAL_MEM_GB" -ge 4 ]; then
+        log_info "CPU supports 1GB huge pages (pdpe1gb flag detected)"
+        log_info "For best performance, add 'hugepagesz=1G hugepages=3' to kernel boot params"
+    fi
+else
+    log_warn "Not running as root. Run with sudo for huge pages setup:"
+    log_warn "  sudo sysctl -w vm.nr_hugepages=${HUGEPAGES_NEEDED}"
 fi
 
 # ─── 7. Generate Optimized config.json ────────────────────────────
